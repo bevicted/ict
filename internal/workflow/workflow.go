@@ -699,22 +699,16 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 	}
 	d := ibmcloud.Discovery{Runner: r.IBMCloud, Environ: r.environment(target.Environment())}
 	if in.ResourceGroup == "" {
-		values, err := d.ResourceGroups(ctx)
-		if err != nil {
-			return in, err
-		}
-		value, err := choose("resource group", values)
+		value, err := prompt.SelectWithLoader(ctx, "resource group", d.ResourceGroups)
 		if err != nil {
 			return in, err
 		}
 		in.ResourceGroup = value
 	}
 	if in.Version == "" {
-		values, err := d.Versions(ctx, in.Platform)
-		if err != nil {
-			return in, err
-		}
-		value, err := choose("version", values)
+		value, err := prompt.SelectWithLoader(ctx, "version", func(ctx context.Context) ([]string, error) {
+			return d.Versions(ctx, in.Platform)
+		})
 		if err != nil {
 			return in, err
 		}
@@ -723,22 +717,16 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 	switch config.Provider(in.Provider) {
 	case config.ProviderVPCGen2:
 		if in.Zone == "" {
-			values, err := d.Zones(ctx)
-			if err != nil {
-				return in, err
-			}
-			value, err := choose("zone", values)
+			value, err := prompt.SelectWithLoader(ctx, "zone", d.Zones)
 			if err != nil {
 				return in, err
 			}
 			in.Zone = value
 		}
 		if in.Flavor == "" {
-			values, err := d.Flavors(ctx, in.Zone)
-			if err != nil {
-				return in, err
-			}
-			value, err := choose("flavor", values)
+			value, err := prompt.SelectWithLoader(ctx, "flavor", func(ctx context.Context) ([]string, error) {
+				return d.Flavors(ctx, in.Zone)
+			})
 			if err != nil {
 				return in, err
 			}
@@ -746,22 +734,16 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 		}
 	case config.ProviderClassic:
 		if in.Datacenter == "" {
-			values, err := d.ClassicDatacenters(ctx)
-			if err != nil {
-				return in, err
-			}
-			value, err := choose("datacenter", values)
+			value, err := prompt.SelectWithLoader(ctx, "datacenter", d.ClassicDatacenters)
 			if err != nil {
 				return in, err
 			}
 			in.Datacenter = value
 		}
 		if in.MachineType == "" {
-			values, err := d.ClassicMachineTypes(ctx, in.Datacenter)
-			if err != nil {
-				return in, err
-			}
-			value, err := choose("machine type", values)
+			value, err := prompt.SelectWithLoader(ctx, "machine type", func(ctx context.Context) ([]string, error) {
+				return d.ClassicMachineTypes(ctx, in.Datacenter)
+			})
 			if err != nil {
 				return in, err
 			}
@@ -769,22 +751,19 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 		}
 	case config.ProviderSatellite:
 		if in.SatelliteManagedFrom == "" {
-			values, err := d.SatelliteManagedFrom(ctx)
-			if err != nil {
-				return in, err
-			}
-			value, err := choose("Satellite management location", values)
+			value, err := prompt.SelectWithLoader(ctx, "Satellite management location", d.SatelliteManagedFrom)
 			if err != nil {
 				return in, err
 			}
 			in.SatelliteManagedFrom = value
 		}
 		if len(in.SatelliteZones) != 3 {
-			zones, err := d.Zones(ctx)
-			if err != nil {
-				return in, err
-			}
-			region, err := choose("Satellite region", regionsFromZones(zones))
+			var zones []string
+			region, err := prompt.SelectWithLoader(ctx, "Satellite region", func(ctx context.Context) ([]string, error) {
+				var err error
+				zones, err = d.Zones(ctx)
+				return regionsFromZones(zones), err
+			})
 			if err != nil {
 				return in, err
 			}
@@ -800,11 +779,7 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 			d.Environ = r.environment(regional.Environment())
 		}
 		if in.SatelliteHostProfile == "" {
-			values, err := d.SatelliteHostProfiles(ctx)
-			if err != nil {
-				return in, err
-			}
-			value, err := choose("Satellite host profile", values)
+			value, err := prompt.SelectWithLoader(ctx, "Satellite host profile", d.SatelliteHostProfiles)
 			if err != nil {
 				return in, err
 			}
@@ -818,11 +793,7 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 			in.SatelliteWorkerOperatingSystem = value
 		}
 		if in.SatelliteHostImage == "" {
-			values, err := d.SatelliteHostImages(ctx)
-			if err != nil {
-				return in, err
-			}
-			value, err := choose("Satellite host image", values)
+			value, err := prompt.SelectWithLoader(ctx, "Satellite host image", d.SatelliteHostImages)
 			if err != nil {
 				return in, err
 			}

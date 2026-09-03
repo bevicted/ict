@@ -2,9 +2,11 @@
 package prompt
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -35,6 +37,15 @@ func Select(ctx context.Context, label string, choices []string) (string, error)
 	return values[0], nil
 }
 
+// SelectWithLoader starts fzf before loading its choices so its streaming input indicator is visible while waiting.
+func SelectWithLoader(ctx context.Context, label string, load func(context.Context) ([]string, error)) (string, error) {
+	values, err := selectLoadedValues(ctx, label, load, false)
+	if err != nil {
+		return "", err
+	}
+	return values[0], nil
+}
+
 // SelectMany chooses one or more values using fzf's multi-select mode.
 func SelectMany(ctx context.Context, label string, choices []string) ([]string, error) {
 	values, err := selectValues(ctx, label, choices, true)
@@ -48,6 +59,12 @@ func selectValues(ctx context.Context, label string, choices []string, multiple 
 	if len(choices) == 0 {
 		return nil, errors.New("no values available for " + label)
 	}
+	return selectLoadedValues(ctx, label, func(context.Context) ([]string, error) {
+		return choices, nil
+	}, multiple)
+}
+
+func selectLoadedValues(ctx context.Context, label string, load func(context.Context) ([]string, error), multiple bool) ([]string, error) {
 	command, err := exec.LookPath("fzf")
 	if err != nil {
 		return nil, err
@@ -56,16 +73,73 @@ func selectValues(ctx context.Context, label string, choices []string, multiple 
 	if multiple {
 		args = append(args, "--multi")
 	}
-	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Stdin = strings.NewReader(strings.Join(choices, "\n") + "\n")
-	output, err := cmd.Output()
+	loadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(loadCtx, command, args...)
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("select %s: %w", label, err)
+		return nil, err
 	}
-	if len(output) == 0 {
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	type loadResult struct {
+		err        error
+		fromLoader bool
+	}
+	loaded := make(chan loadResult, 1)
+	go func() {
+		choices, loadErr := load(loadCtx)
+		if loadErr == nil && len(choices) == 0 {
+			loadErr = errors.New("no values available for " + label)
+		}
+		if loadErr != nil {
+			loaded <- loadResult{err: loadErr, fromLoader: true}
+			_ = stdin.Close()
+			return
+		}
+		_, writeErr := io.WriteString(stdin, strings.Join(choices, "\n")+"\n")
+		loaded <- loadResult{err: writeErr}
+		_ = stdin.Close()
+	}()
+
+	commandDone := make(chan error, 1)
+	go func() { commandDone <- cmd.Wait() }()
+
+	var commandErr error
+	select {
+	case result := <-loaded:
+		if result.fromLoader {
+			cancel()
+			_ = stdin.Close()
+			<-commandDone
+			return nil, result.err
+		}
+		commandErr = <-commandDone
+		if result.err != nil && commandErr == nil {
+			return nil, result.err
+		}
+	case commandErr = <-commandDone:
+		select {
+		case result := <-loaded:
+			if result.fromLoader {
+				return nil, result.err
+			}
+		default:
+		}
+	}
+	cancel()
+	_ = stdin.Close()
+	if commandErr != nil {
+		return nil, fmt.Errorf("select %s: %w", label, commandErr)
+	}
+	if output.Len() == 0 {
 		return nil, errors.New("no value selected for " + label)
 	}
-	values := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+	values := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
 	if len(values) == 1 && values[0] == "" {
 		return nil, errors.New("no value selected for " + label)
 	}
