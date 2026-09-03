@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 var (
@@ -47,7 +48,31 @@ type Discovery struct {
 }
 
 func (d Discovery) ResourceGroups(ctx context.Context) ([]string, error) {
-	return d.values(ctx, `^[^\s].*$`, "resource", "groups", "--output", "json", "-q")
+	if d.Runner == nil {
+		d.Runner = CommandRunner{}
+	}
+	data, err := d.Runner.Run(ctx, d.Environ, "ibmcloud", "resource", "groups", "--output", "json", "-q")
+	if err != nil {
+		return nil, err
+	}
+	var groups []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &groups); err != nil {
+		return nil, fmt.Errorf("decode ibmcloud resource groups JSON: %w", err)
+	}
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		if strings.TrimSpace(group.Name) != "" {
+			seen[group.Name] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(seen))
+	for value := range seen {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values, nil
 }
 
 func (d Discovery) Zones(ctx context.Context) ([]string, error) {

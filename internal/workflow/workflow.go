@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,6 +95,7 @@ type RecoveryContext struct {
 	Endpoints                        config.Endpoints `json:"endpoints"`
 	Values                           Values           `json:"values"`
 	SatelliteSSHPublicKeyFingerprint string           `json:"satellite_ssh_public_key_fingerprint,omitempty"`
+	TFVarsSHA256                     string           `json:"tfvars_sha256"`
 }
 
 // CommandRunner is the injectable Terraform subprocess seam.
@@ -209,10 +211,19 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 		return err
 	}
 	environment := r.environment(target.Environment())
-	managed := r.hasState(ctx, environment, workspace)
+	if _, err := r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
+		return err
+	}
+	managed, err := r.hasState(ctx, environment, workspace)
+	if err != nil {
+		return fmt.Errorf("inspect Terraform state: %w", err)
+	}
 	contextPath := filepath.Join(workspace, ictterraform.ContextName)
 	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
-	recovery := newRecoveryContext(target, values)
+	recovery, err := newRecoveryContext(target, values)
+	if err != nil {
+		return err
+	}
 	if managed {
 		if err := savedInputsMatch(tfvarsPath, contextPath, recovery); err != nil {
 			return err
@@ -221,9 +232,6 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 		return err
 	}
 
-	if _, err := r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
-		return err
-	}
 	if action == "create" {
 		if !managed {
 			if err := writeJSON(contextPath, recovery); err != nil {
@@ -236,7 +244,7 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 	if _, err := r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "plan", "-input=false", "-var-file="+tfvarsPath); err != nil {
 		return err
 	}
-	if !r.hasState(ctx, environment, workspace) {
+	if !managed {
 		return writeJSON(contextPath, recovery)
 	}
 	return nil
@@ -257,6 +265,9 @@ func (r Runner) Destroy(ctx context.Context) error {
 	if _, err := os.Stat(tfvarsPath); err != nil {
 		return fmt.Errorf("no saved Terraform values at %s; cannot safely destroy state", tfvarsPath)
 	}
+	if err := savedInputsMatch(tfvarsPath, contextPath, recovery); err != nil {
+		return err
+	}
 	if err := ictterraform.Materialize(workspace); err != nil {
 		return err
 	}
@@ -266,7 +277,11 @@ func (r Runner) Destroy(ctx context.Context) error {
 			return err
 		}
 	}
-	if !r.hasState(ctx, environment, workspace) {
+	managed, err := r.hasState(ctx, environment, workspace)
+	if err != nil {
+		return fmt.Errorf("inspect Terraform state: %w", err)
+	}
+	if !managed {
 		return errors.New("Terraform state has no managed resources; refusing destroy")
 	}
 	if _, err := r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
@@ -276,9 +291,12 @@ func (r Runner) Destroy(ctx context.Context) error {
 	return err
 }
 
-func (r Runner) hasState(ctx context.Context, environ []string, workspace string) bool {
+func (r Runner) hasState(ctx context.Context, environ []string, workspace string) (bool, error) {
 	output, err := r.terraform().Run(ctx, environ, "terraform", "-chdir="+workspace, "state", "list")
-	return err == nil && strings.TrimSpace(string(output)) != ""
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(output)) != "", nil
 }
 
 func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs) (Values, config.ResolvedTarget, error) {
@@ -515,7 +533,11 @@ func readSSHPublicKey(path string) (string, error) {
 	if err != nil {
 		return "", sshPublicKeyReadError{cause: err}
 	}
-	for _, line := range strings.Split(string(contents), "\n") {
+	return parseSSHPublicKey(string(contents))
+}
+
+func parseSSHPublicKey(contents string) (string, error) {
+	for _, line := range strings.Split(contents, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -559,10 +581,21 @@ func sshPublicKeyFingerprint(key string) string {
 	return "SHA256:" + base64.RawStdEncoding.EncodeToString(digest[:])
 }
 
-func newRecoveryContext(target config.ResolvedTarget, values Values) RecoveryContext {
+func newRecoveryContext(target config.ResolvedTarget, values Values) (RecoveryContext, error) {
+	data, err := marshalJSON(values)
+	if err != nil {
+		return RecoveryContext{}, err
+	}
 	fingerprint := sshPublicKeyFingerprint(values.SatelliteSSHPublicKey)
 	values.SatelliteSSHPublicKey = ""
-	return RecoveryContext{Version: 1, Target: target.Name, Endpoints: target.Endpoints, Values: values, SatelliteSSHPublicKeyFingerprint: fingerprint}
+	return RecoveryContext{
+		Version:                          1,
+		Target:                           target.Name,
+		Endpoints:                        target.Endpoints,
+		Values:                           values,
+		SatelliteSSHPublicKeyFingerprint: fingerprint,
+		TFVarsSHA256:                     tfvarsSHA256(data),
+	}, nil
 }
 
 func (r Runner) resolveName(supplied Inputs) (string, error) {
@@ -913,15 +946,28 @@ func truncate(value string, length int) string {
 	return value
 }
 
-func writeJSON(path string, value any) error {
+func marshalJSON(value any) ([]byte, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("marshal runtime values: %w", err)
+		return nil, fmt.Errorf("marshal runtime values: %w", err)
 	}
-	if err := ictterraform.AtomicWrite(path, append(data, '\n')); err != nil {
+	return append(data, '\n'), nil
+}
+
+func writeJSON(path string, value any) error {
+	data, err := marshalJSON(value)
+	if err != nil {
+		return err
+	}
+	if err := ictterraform.AtomicWrite(path, data); err != nil {
 		return fmt.Errorf("write runtime values: %w", err)
 	}
 	return nil
+}
+
+func tfvarsSHA256(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 func readRecovery(path string) (RecoveryContext, error) {
 	data, err := os.ReadFile(path)
@@ -932,22 +978,129 @@ func readRecovery(path string) (RecoveryContext, error) {
 	if err := json.Unmarshal(data, &recovery); err != nil || recovery.Version != 1 || recovery.Target == "" {
 		return RecoveryContext{}, errors.New("invalid saved context")
 	}
+	if err := validateRecoveryForDestroy(recovery); err != nil {
+		return RecoveryContext{}, err
+	}
 	return recovery, nil
 }
+
+func validateRecoveryForDestroy(recovery RecoveryContext) error {
+	if len(recovery.TFVarsSHA256) != sha256.Size*2 {
+		return incompleteRecoveryContextError()
+	}
+	if _, err := hex.DecodeString(recovery.TFVarsSHA256); err != nil {
+		return incompleteRecoveryContextError()
+	}
+	provider, err := validateRecoveryValues(recovery.Values, recovery.SatelliteSSHPublicKeyFingerprint)
+	if err != nil {
+		return incompleteRecoveryContextError()
+	}
+	target := config.Target{
+		Providers:     []config.Provider{provider},
+		DefaultRegion: recovery.Values.Region,
+		Endpoints:     recovery.Endpoints,
+	}
+	resolved, err := (&config.Config{Targets: map[string]config.Target{recovery.Target: target}}).ResolveTarget(recovery.Target, nil)
+	if err != nil || resolved.Name != recovery.Target {
+		return incompleteRecoveryContextError()
+	}
+	return nil
+}
+
+func validateRecoveryValues(values Values, fingerprint string) (config.Provider, error) {
+	if strings.TrimSpace(values.ResourceGroupName) == "" || values.WorkerCount < 1 || (values.Platform != "kubernetes" && values.Platform != "openshift") {
+		return "", errors.New("invalid recovery values")
+	}
+	version, err := normalizeVersion(values.Platform, values.KubeVersion)
+	if err != nil || version != values.KubeVersion {
+		return "", errors.New("invalid recovery values")
+	}
+
+	switch values.ClusterMode {
+	case "vpc":
+		if !zonePattern.MatchString(values.Zone) || zoneRegion(values.Zone) != values.Region || !flavorPattern.MatchString(values.Flavor) || !vpcClusterPattern.MatchString(values.ClusterName) || fingerprint != "" || !emptyValues(values, "vpc") {
+			return "", errors.New("invalid recovery values")
+		}
+		return config.ProviderVPCGen2, nil
+	case "classic":
+		if !datacenterPattern.MatchString(values.Datacenter) || !flavorPattern.MatchString(values.MachineType) || !vlanPattern.MatchString(values.PublicVLANID) || !vlanPattern.MatchString(values.PrivateVLANID) || !classicClusterPattern.MatchString(values.ClusterName) || fingerprint != "" || !emptyValues(values, "classic") {
+			return "", errors.New("invalid recovery values")
+		}
+		return config.ProviderClassic, nil
+	case "satellite":
+		region, err := satelliteRegion(values.SatelliteZones)
+		if err != nil || region != values.Region || values.Platform != "openshift" || !satelliteClusterPattern.MatchString(values.ClusterName) || strings.TrimSpace(values.SatelliteManagedFrom) == "" || strings.TrimSpace(values.SatelliteHostImage) == "" || !hostProfilePattern.MatchString(values.SatelliteHostProfile) || (values.SatelliteWorkerOperatingSystem != "RHCOS" && values.SatelliteWorkerOperatingSystem != "REDHAT_8_64") || values.SatelliteSSHPublicKey != "" || fingerprint == "" || (values.WorkerCount != 1 && values.WorkerCount != 3) || !emptyValues(values, "satellite") {
+			return "", errors.New("invalid recovery values")
+		}
+		return config.ProviderSatellite, nil
+	default:
+		return "", errors.New("invalid recovery values")
+	}
+}
+
+func emptyValues(values Values, provider string) bool {
+	switch provider {
+	case "vpc":
+		return values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteWorkerOperatingSystem == ""
+	case "classic":
+		return values.Zone == "" && values.Flavor == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteWorkerOperatingSystem == ""
+	case "satellite":
+		return values.Zone == "" && values.Flavor == "" && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
+	default:
+		return false
+	}
+}
+
+func incompleteRecoveryContextError() error {
+	return errors.New("incomplete or invalid saved context; cannot safely destroy")
+}
+
 func savedInputsMatch(tfvarsPath, contextPath string, expected RecoveryContext) error {
 	tfvars, err := os.ReadFile(tfvarsPath)
 	if err != nil {
 		return errors.New("Terraform state manages resources but saved recovery inputs are missing")
 	}
-	var actualValues Values
-	if json.Unmarshal(tfvars, &actualValues) != nil {
+	actualValues, err := decodeValues(tfvars)
+	if err != nil {
 		return errors.New("Terraform state manages resources but saved recovery inputs are invalid")
 	}
-	fingerprint := sshPublicKeyFingerprint(actualValues.SatelliteSSHPublicKey)
-	actualValues.SatelliteSSHPublicKey = ""
 	actual, err := readRecovery(contextPath)
-	if err != nil || fingerprint != expected.SatelliteSSHPublicKeyFingerprint || !reflect.DeepEqual(actualValues, expected.Values) || !reflect.DeepEqual(actual, expected) {
+	if err != nil {
+		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
+	}
+	if actual.TFVarsSHA256 != tfvarsSHA256(tfvars) {
+		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
+	}
+	actualValues, err = recoveryValuesFromTFVars(actualValues, actual.SatelliteSSHPublicKeyFingerprint)
+	if err != nil || !reflect.DeepEqual(actualValues, expected.Values) || !reflect.DeepEqual(actual, expected) {
 		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
 	}
 	return nil
+}
+
+func decodeValues(data []byte) (Values, error) {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var values Values
+	if err := decoder.Decode(&values); err != nil {
+		return Values{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return Values{}, errors.New("invalid trailing JSON")
+	}
+	return values, nil
+}
+
+func recoveryValuesFromTFVars(values Values, fingerprint string) (Values, error) {
+	if values.ClusterMode == "satellite" {
+		key, err := parseSSHPublicKey(values.SatelliteSSHPublicKey)
+		if err != nil || key != values.SatelliteSSHPublicKey || sshPublicKeyFingerprint(key) != fingerprint {
+			return Values{}, errors.New("invalid Satellite recovery values")
+		}
+		values.SatelliteSSHPublicKey = ""
+	}
+	if _, err := validateRecoveryValues(values, fingerprint); err != nil {
+		return Values{}, err
+	}
+	return values, nil
 }

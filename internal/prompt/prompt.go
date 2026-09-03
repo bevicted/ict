@@ -62,8 +62,11 @@ func selectValues(ctx context.Context, label string, choices []string, multiple 
 	if err != nil {
 		return nil, fmt.Errorf("select %s: %w", label, err)
 	}
-	values := strings.Fields(string(output))
-	if len(values) == 0 {
+	if len(output) == 0 {
+		return nil, errors.New("no value selected for " + label)
+	}
+	values := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+	if len(values) == 1 && values[0] == "" {
 		return nil, errors.New("no value selected for " + label)
 	}
 	return values, nil

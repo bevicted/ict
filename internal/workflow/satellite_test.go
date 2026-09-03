@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -51,8 +52,8 @@ func TestSatelliteLifecyclePersistsWithoutPublicKeyLeak(t *testing.T) {
 	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
 		t.Fatalf("mismatched Satellite create error = %v", err)
 	}
-	if len(fake.calls) != 1 || !strings.HasSuffix(strings.Join(fake.calls[0], " "), "state list") {
-		t.Fatalf("mismatched Satellite calls = %#v", fake.calls)
+	if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "init, state list" {
+		t.Fatalf("mismatched Satellite actions = %q", got)
 	}
 	fake.calls = nil
 	if err := runner.Destroy(context.Background()); err != nil {
@@ -60,6 +61,43 @@ func TestSatelliteLifecyclePersistsWithoutPublicKeyLeak(t *testing.T) {
 	}
 	if got := strings.Join(fake.calls[len(fake.calls)-1], " "); !strings.Contains(got, "destroy -input=false -auto-approve") {
 		t.Fatalf("Satellite destroy did not run: %q", got)
+	}
+}
+
+func TestSatelliteDestroyRejectsModifiedSSHPublicKey(t *testing.T) {
+	workspace := t.TempDir()
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	inputs := configuredSatelliteInputs(t)
+	if err := runner.Plan(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+
+	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
+	data, err := os.ReadFile(tfvarsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values Values
+	if err := json.Unmarshal(data, &values); err != nil {
+		t.Fatal(err)
+	}
+	values.SatelliteSSHPublicKey = strings.Replace(values.SatelliteSSHPublicKey, "synthetic-comment", "modified-comment", 1)
+	data, err = json.Marshal(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tfvarsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fake.resources = true
+	fake.calls = nil
+	if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
+		t.Fatalf("destroy after SSH public-key modification = %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("destroy after SSH public-key modification called Terraform: %#v", fake.calls)
 	}
 }
 

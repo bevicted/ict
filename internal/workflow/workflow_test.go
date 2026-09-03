@@ -2,8 +2,11 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,6 +21,8 @@ import (
 
 type fakeTerraform struct {
 	resources bool
+	initErr   error
+	stateErr  error
 	calls     [][]string
 	environs  [][]string
 }
@@ -64,7 +69,13 @@ func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args .
 func (f *fakeTerraform) Run(_ context.Context, environ []string, _ string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string(nil), args...))
 	f.environs = append(f.environs, append([]string(nil), environ...))
+	if len(args) >= 2 && args[1] == "init" && f.initErr != nil {
+		return nil, f.initErr
+	}
 	if len(args) >= 2 && args[len(args)-2] == "state" && args[len(args)-1] == "list" {
+		if f.stateErr != nil {
+			return nil, f.stateErr
+		}
 		if f.resources {
 			return []byte("ibm_container_vpc_cluster.cluster\n"), nil
 		}
@@ -149,6 +160,68 @@ func newRunner(workspace string, fake *fakeTerraform) Runner {
 	return Runner{Workspace: workspace, Terraform: fake, Terminal: func() bool { return false }, Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }, Suffix: func() string { return "deadbeef" }}
 }
 
+func terraformActions(t *testing.T, calls [][]string) []string {
+	t.Helper()
+	actions := make([]string, 0, len(calls))
+	for _, call := range calls {
+		switch {
+		case len(call) >= 2 && call[1] == "init":
+			actions = append(actions, "init")
+		case len(call) >= 3 && call[1] == "state" && call[2] == "list":
+			actions = append(actions, "state list")
+		case len(call) >= 2 && call[1] == "plan":
+			actions = append(actions, "plan")
+		case len(call) >= 2 && call[1] == "apply":
+			actions = append(actions, "apply")
+		case len(call) >= 2 && call[1] == "destroy":
+			actions = append(actions, "destroy")
+		default:
+			t.Fatalf("unexpected Terraform call: %#v", call)
+		}
+	}
+	return actions
+}
+
+func TestInitialLifecycleTerraformActionOrder(t *testing.T) {
+	tests := []struct {
+		name    string
+		inputs  func(*testing.T) Inputs
+		environ []string
+	}{
+		{name: "VPC", inputs: configuredInputs},
+		{name: "Classic", inputs: configuredClassicInputs, environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}},
+		{name: "Satellite", inputs: configuredSatelliteInputs},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, action := range []string{"plan", "create"} {
+				t.Run(action, func(t *testing.T) {
+					fake := &fakeTerraform{}
+					runner := newRunner(t.TempDir(), fake)
+					runner.Environ = test.environ
+
+					var err error
+					if action == "plan" {
+						err = runner.Plan(context.Background(), test.inputs(t))
+					} else {
+						err = runner.Create(context.Background(), test.inputs(t))
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := "init, state list, " + action
+					if action == "create" {
+						want = "init, state list, apply"
+					}
+					if got := strings.Join(terraformActions(t, fake.calls), ", "); got != want {
+						t.Fatalf("%s first-run Terraform actions = %q, want %q", action, got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "state", "ict", "terraform")
 	fake := &fakeTerraform{}
@@ -201,8 +274,8 @@ func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
 		t.Fatalf("mismatched create error = %v", err)
 	}
-	if len(fake.calls) != 1 || !strings.HasSuffix(strings.Join(fake.calls[0], " "), "state list") {
-		t.Fatalf("mismatched create calls = %#v", fake.calls)
+	if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "init, state list" {
+		t.Fatalf("mismatched create actions = %q", got)
 	}
 	fake.calls = nil
 	if err := runner.Destroy(context.Background()); err != nil {
@@ -259,8 +332,8 @@ func TestClassicLifecyclePersistsAndOmitsVPCValues(t *testing.T) {
 	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
 		t.Fatalf("mismatched Classic create error = %v", err)
 	}
-	if len(fake.calls) != 1 || !strings.HasSuffix(strings.Join(fake.calls[0], " "), "state list") {
-		t.Fatalf("mismatched Classic create calls = %#v", fake.calls)
+	if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "init, state list" {
+		t.Fatalf("mismatched Classic create actions = %q", got)
 	}
 	fake.calls = nil
 	if err := runner.Destroy(context.Background()); err != nil {
@@ -437,17 +510,400 @@ func TestDestroyRefusesEmptyState(t *testing.T) {
 	if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "no saved context") {
 		t.Fatalf("destroy without context = %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(workspace, ".cluster"), 0o700); err != nil {
+	if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workspace, ictterraform.ContextName), []byte(`{"version":1,"target":"example","endpoints":{},"values":{}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workspace, ictterraform.TFVarsName), []byte(`{}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	fake.calls = nil
 	if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "state has no managed resources") {
 		t.Fatalf("empty state destroy = %v", err)
+	}
+	if len(fake.calls) != 1 || !strings.HasSuffix(strings.Join(fake.calls[0], " "), "state list") {
+		t.Fatalf("empty state destroy calls = %#v", fake.calls)
+	}
+}
+
+func TestDestroyRequiresCompleteSavedContext(t *testing.T) {
+	endpointFields := []struct {
+		name        string
+		environment string
+		clear       func(*config.Endpoints)
+	}{
+		{name: "iam", environment: "IBMCLOUD_IAM_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.IAM = "" }},
+		{name: "container service", environment: "IBMCLOUD_CS_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.ContainerService = "" }},
+		{name: "global tagging", environment: "IBMCLOUD_GT_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.GlobalTagging = "" }},
+		{name: "resource management", environment: "IBMCLOUD_RESOURCE_MANAGEMENT_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.ResourceManagement = "" }},
+		{name: "resource controller", environment: "IBMCLOUD_RESOURCE_CONTROLLER_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.ResourceController = "" }},
+	}
+	tests := []struct {
+		name    string
+		inputs  func(*testing.T) Inputs
+		environ []string
+		fields  []struct {
+			name        string
+			environment string
+			clear       func(*config.Endpoints)
+		}
+	}{
+		{name: "VPC", inputs: configuredInputs, fields: append(endpointFields, struct {
+			name        string
+			environment string
+			clear       func(*config.Endpoints)
+		}{name: "VPC", environment: "IBMCLOUD_IS_NG_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.VPC = "" }})},
+		{name: "Classic", inputs: configuredClassicInputs, environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}, fields: endpointFields},
+		{name: "Satellite", inputs: configuredSatelliteInputs, fields: append(endpointFields,
+			struct {
+				name        string
+				environment string
+				clear       func(*config.Endpoints)
+			}{name: "VPC", environment: "IBMCLOUD_IS_NG_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.VPC = "" }},
+			struct {
+				name        string
+				environment string
+				clear       func(*config.Endpoints)
+			}{name: "Satellite", environment: "IBMCLOUD_SATELLITE_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.Satellite = "" }},
+			struct {
+				name        string
+				environment string
+				clear       func(*config.Endpoints)
+			}{name: "Satellite config", environment: "IBMCLOUD_SATELLITE_CONFIG_API_ENDPOINT", clear: func(endpoints *config.Endpoints) { endpoints.SatelliteConfig = "" }},
+		)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, field := range test.fields {
+				t.Run(field.name, func(t *testing.T) {
+					workspace := t.TempDir()
+					fake := &fakeTerraform{}
+					runner := newRunner(workspace, fake)
+					runner.Environ = test.environ
+					if err := runner.Plan(context.Background(), test.inputs(t)); err != nil {
+						t.Fatal(err)
+					}
+					contextPath := filepath.Join(workspace, ictterraform.ContextName)
+					data, err := os.ReadFile(contextPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var recovery RecoveryContext
+					if err := json.Unmarshal(data, &recovery); err != nil {
+						t.Fatal(err)
+					}
+					field.clear(&recovery.Endpoints)
+					data, err = json.Marshal(recovery)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(contextPath, data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					runner.Environ = append(append([]string(nil), test.environ...), field.environment+"=https://current.example.invalid")
+					fake.resources = true
+					fake.calls = nil
+					if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "incomplete or invalid saved context") {
+						t.Fatalf("destroy with incomplete context = %v", err)
+					}
+					if len(fake.calls) != 0 {
+						t.Fatalf("destroy with incomplete context called Terraform: %#v", fake.calls)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestDestroyRejectsPartialOrMismatchedSavedValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		inputs  func(*testing.T) Inputs
+		environ []string
+		partial func(*Values)
+	}{
+		{name: "VPC", inputs: configuredInputs, partial: func(values *Values) { values.Zone = "" }},
+		{name: "Classic", inputs: configuredClassicInputs, environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}, partial: func(values *Values) { values.Datacenter = "" }},
+		{name: "Satellite", inputs: configuredSatelliteInputs, partial: func(values *Values) { values.SatelliteHostProfile = "" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, scenario := range []struct {
+				name   string
+				path   string
+				mutate func(*Values)
+			}{
+				{name: "partial recovery values", path: ictterraform.ContextName, mutate: test.partial},
+				{name: "tfvars mismatch", path: ictterraform.TFVarsName, mutate: func(values *Values) { values.ClusterName += "-other" }},
+			} {
+				t.Run(scenario.name, func(t *testing.T) {
+					workspace := t.TempDir()
+					fake := &fakeTerraform{}
+					runner := newRunner(workspace, fake)
+					runner.Environ = test.environ
+					if err := runner.Plan(context.Background(), test.inputs(t)); err != nil {
+						t.Fatal(err)
+					}
+
+					contextPath := filepath.Join(workspace, ictterraform.ContextName)
+					tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
+					contextBytes, err := os.ReadFile(contextPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var recovery RecoveryContext
+					if err := json.Unmarshal(contextBytes, &recovery); err != nil {
+						t.Fatal(err)
+					}
+					tfvarsBytes, err := os.ReadFile(tfvarsPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var values Values
+					if err := json.Unmarshal(tfvarsBytes, &values); err != nil {
+						t.Fatal(err)
+					}
+					if scenario.path == ictterraform.ContextName {
+						scenario.mutate(&recovery.Values)
+						contextBytes, err = json.Marshal(recovery)
+						if err == nil {
+							err = os.WriteFile(contextPath, contextBytes, 0o600)
+						}
+					} else {
+						scenario.mutate(&values)
+						tfvarsBytes, err = json.Marshal(values)
+						if err == nil {
+							err = os.WriteFile(tfvarsPath, tfvarsBytes, 0o600)
+						}
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					fake.resources = true
+					fake.calls = nil
+					if err := runner.Destroy(context.Background()); err == nil {
+						t.Fatal("destroy accepted invalid saved values")
+					}
+					if len(fake.calls) != 0 {
+						t.Fatalf("destroy with invalid saved values called Terraform: %#v", fake.calls)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRecoveryContextAtomicallyBindsExactTFVars(t *testing.T) {
+	tests := []struct {
+		name    string
+		inputs  func(*testing.T) Inputs
+		environ []string
+	}{
+		{name: "VPC", inputs: configuredInputs},
+		{name: "Classic", inputs: configuredClassicInputs, environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}},
+		{name: "Satellite", inputs: configuredSatelliteInputs},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			fake := &fakeTerraform{}
+			runner := newRunner(workspace, fake)
+			runner.Environ = test.environ
+			if err := runner.Plan(context.Background(), test.inputs(t)); err != nil {
+				t.Fatal(err)
+			}
+
+			tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
+			contextPath := filepath.Join(workspace, ictterraform.ContextName)
+			tfvars, err := os.ReadFile(tfvarsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contextData, err := os.ReadFile(contextPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recovery RecoveryContext
+			if err := json.Unmarshal(contextData, &recovery); err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(tfvars)
+			if got, want := recovery.TFVarsSHA256, hex.EncodeToString(digest[:]); got != want {
+				t.Fatalf("saved tfvars digest = %q, want digest of persisted tfvars", got)
+			}
+			if _, err := readRecovery(contextPath); err != nil {
+				t.Fatalf("persisted recovery context did not round trip: %v", err)
+			}
+			for _, path := range []string{tfvarsPath, contextPath} {
+				info, err := os.Stat(path)
+				if err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("private runtime file %s = %v, %v", path, info, err)
+				}
+			}
+			if temporary, err := filepath.Glob(filepath.Join(workspace, ".cluster", ".ict-*")); err != nil || len(temporary) != 0 {
+				t.Fatalf("atomic persistence left temporary files: %v, %v", temporary, err)
+			}
+
+			if err := os.WriteFile(tfvarsPath, append(tfvars, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fake.resources = true
+			fake.calls = nil
+			if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
+				t.Fatalf("destroy after tfvars byte change = %v", err)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("destroy after tfvars byte change called Terraform: %#v", fake.calls)
+			}
+		})
+	}
+}
+
+func TestDestroyRestoresSavedEndpoints(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputs     func(*testing.T) Inputs
+		savedEnv   []string
+		currentEnv []string
+		key        string
+		want       string
+	}{
+		{name: "VPC", inputs: configuredInputs, savedEnv: []string{"IBMCLOUD_IS_NG_API_ENDPOINT=https://saved-vpc.example.invalid"}, currentEnv: []string{"IBMCLOUD_IS_NG_API_ENDPOINT=https://current-vpc.example.invalid"}, key: "IBMCLOUD_IS_NG_API_ENDPOINT", want: "https://saved-vpc.example.invalid"},
+		{name: "Classic", inputs: configuredClassicInputs, savedEnv: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key", "IBMCLOUD_CS_API_ENDPOINT=https://saved-container.example.invalid"}, currentEnv: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key", "IBMCLOUD_CS_API_ENDPOINT=https://current-container.example.invalid"}, key: "IBMCLOUD_CS_API_ENDPOINT", want: "https://saved-container.example.invalid"},
+		{name: "Satellite", inputs: configuredSatelliteInputs, savedEnv: []string{"IBMCLOUD_SATELLITE_CONFIG_API_ENDPOINT=https://saved-satellite-config.example.invalid"}, currentEnv: []string{"IBMCLOUD_SATELLITE_CONFIG_API_ENDPOINT=https://current-satellite-config.example.invalid"}, key: "IBMCLOUD_SATELLITE_CONFIG_API_ENDPOINT", want: "https://saved-satellite-config.example.invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeTerraform{}
+			runner := newRunner(t.TempDir(), fake)
+			runner.Environ = test.savedEnv
+			if err := runner.Plan(context.Background(), test.inputs(t)); err != nil {
+				t.Fatal(err)
+			}
+			fake.resources = true
+			fake.calls, fake.environs = nil, nil
+			runner.Environ = test.currentEnv
+			if err := runner.Destroy(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			for _, environ := range fake.environs {
+				if got := environmentValue(environ, test.key); got != test.want {
+					t.Fatalf("destroy %s = %q, want saved %q", test.key, got, test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestStateListFailuresRefusePlanAndCreateBeforePersistence(t *testing.T) {
+	tests := []struct {
+		name    string
+		inputs  func(*testing.T) Inputs
+		environ []string
+	}{
+		{name: "VPC", inputs: configuredInputs},
+		{name: "Classic", inputs: configuredClassicInputs, environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}},
+		{name: "Satellite", inputs: configuredSatelliteInputs},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, action := range []string{"plan", "create"} {
+				t.Run(action, func(t *testing.T) {
+					workspace := t.TempDir()
+					fake := &fakeTerraform{stateErr: errors.New("state unavailable")}
+					runner := newRunner(workspace, fake)
+					runner.Environ = test.environ
+
+					var err error
+					if action == "plan" {
+						err = runner.Plan(context.Background(), test.inputs(t))
+					} else {
+						err = runner.Create(context.Background(), test.inputs(t))
+					}
+					if err == nil || !strings.Contains(err.Error(), "inspect Terraform state: state unavailable") {
+						t.Fatalf("%s state-list error = %v", action, err)
+					}
+					if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "init, state list" {
+						t.Fatalf("%s state-list error actions = %q", action, got)
+					}
+					for _, path := range []string{ictterraform.TFVarsName, ictterraform.ContextName} {
+						if _, err := os.Stat(filepath.Join(workspace, path)); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("%s persisted after state-list error: %v", path, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestInitFailuresRefusePlanAndCreateBeforePersistence(t *testing.T) {
+	tests := []struct {
+		name    string
+		inputs  func(*testing.T) Inputs
+		environ []string
+	}{
+		{name: "VPC", inputs: configuredInputs},
+		{name: "Classic", inputs: configuredClassicInputs, environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}},
+		{name: "Satellite", inputs: configuredSatelliteInputs},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, action := range []string{"plan", "create"} {
+				t.Run(action, func(t *testing.T) {
+					workspace := t.TempDir()
+					fake := &fakeTerraform{initErr: errors.New("initialization unavailable")}
+					runner := newRunner(workspace, fake)
+					runner.Environ = test.environ
+
+					var err error
+					if action == "plan" {
+						err = runner.Plan(context.Background(), test.inputs(t))
+					} else {
+						err = runner.Create(context.Background(), test.inputs(t))
+					}
+					if err == nil || !strings.Contains(err.Error(), "initialization unavailable") {
+						t.Fatalf("%s init error = %v", action, err)
+					}
+					if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "init" {
+						t.Fatalf("%s init error actions = %q", action, got)
+					}
+					for _, path := range []string{ictterraform.TFVarsName, ictterraform.ContextName} {
+						if _, err := os.Stat(filepath.Join(workspace, path)); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("%s persisted after init error: %v", path, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestStateListFailuresRefuseDestroy(t *testing.T) {
+	tests := []struct {
+		name    string
+		inputs  func(*testing.T) Inputs
+		environ []string
+	}{
+		{name: "VPC", inputs: configuredInputs},
+		{name: "Classic", inputs: configuredClassicInputs, environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}},
+		{name: "Satellite", inputs: configuredSatelliteInputs},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			fake := &fakeTerraform{}
+			runner := newRunner(workspace, fake)
+			runner.Environ = test.environ
+			if err := runner.Plan(context.Background(), test.inputs(t)); err != nil {
+				t.Fatal(err)
+			}
+			fake.stateErr = errors.New("state unavailable")
+			fake.calls = nil
+			if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "inspect Terraform state: state unavailable") {
+				t.Fatalf("destroy state-list error = %v", err)
+			}
+			if len(fake.calls) != 1 || !strings.HasSuffix(strings.Join(fake.calls[0], " "), "state list") {
+				t.Fatalf("destroy calls = %#v", fake.calls)
+			}
+		})
 	}
 }
 

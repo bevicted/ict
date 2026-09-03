@@ -16,6 +16,24 @@ func (f *fakeRunner) Run(_ context.Context, _ []string, _ string, args ...string
 	return f.output, nil
 }
 
+func TestResourceGroupsUseOnlyTopLevelNames(t *testing.T) {
+	fake := &fakeRunner{output: []byte(`[
+		{"name":"group with spaces","id":"unrelated identifier","metadata":{"name":"nested group"}},
+		{"id":"identifier only","label":"arbitrary string"},
+		{"name":"another group"}
+	]`)}
+	values, err := (Discovery{Runner: fake}).ResourceGroups(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"another group", "group with spaces"}; !reflect.DeepEqual(values, want) {
+		t.Fatalf("resource groups = %#v, want %#v", values, want)
+	}
+	if want := []string{"resource", "groups", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
+		t.Fatalf("resource group args = %#v, want %#v", fake.args, want)
+	}
+}
+
 func TestClassicDiscoveryUsesClassicCommands(t *testing.T) {
 	fake := &fakeRunner{output: []byte(`[{"name":"dal10"},{"name":"not-a-datacenter"}]`)}
 	values, err := (Discovery{Runner: fake}).ClassicDatacenters(context.Background())
