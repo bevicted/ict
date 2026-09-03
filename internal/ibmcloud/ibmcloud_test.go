@@ -2,7 +2,10 @@ package ibmcloud
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +17,25 @@ type fakeRunner struct {
 func (f *fakeRunner) Run(_ context.Context, _ []string, _ string, args ...string) ([]byte, error) {
 	f.args = args
 	return f.output, nil
+}
+
+func TestCommandRunnerReportsIBMCloudOutputOnFailure(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "ibmcloud")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'authentication failed\\n' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+
+	_, err := (CommandRunner{}).Run(context.Background(), os.Environ(), "ibmcloud")
+	if err == nil {
+		t.Fatal("Run succeeded, want command failure")
+	}
+	for _, want := range []string{"run ibmcloud: exit status 1", "authentication failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
 }
 
 func TestResourceGroupsUseOnlyTopLevelNames(t *testing.T) {

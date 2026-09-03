@@ -34,8 +34,13 @@ func (CommandRunner) Run(ctx context.Context, environ []string, command string, 
 	}
 	cmd := exec.CommandContext(ctx, "ibmcloud", args...)
 	cmd.Env = environ
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
+		if detail := strings.TrimSpace(string(output) + "\n" + stderr.String()); detail != "" {
+			return nil, fmt.Errorf("run ibmcloud: %w: %s", err, detail)
+		}
 		return nil, fmt.Errorf("run ibmcloud: %w", err)
 	}
 	return output, nil
