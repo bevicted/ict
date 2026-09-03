@@ -103,7 +103,7 @@ func TestClassicDiscoveryUsesClassicCommands(t *testing.T) {
 	if want := []string{"dal10"}; !reflect.DeepEqual(values, want) {
 		t.Fatalf("datacenters = %#v, want %#v", values, want)
 	}
-	if want := []string{"ks", "locations", "--provider", "classic", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
+	if want := []string{"ks", "zones", "--provider", "classic", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
 		t.Fatalf("datacenter args = %#v, want %#v", fake.args, want)
 	}
 
@@ -129,7 +129,7 @@ func TestSatelliteDiscoveryUsesJSONCommands(t *testing.T) {
 	if want := []string{"us-south"}; !reflect.DeepEqual(values, want) {
 		t.Fatalf("management locations = %#v, want %#v", values, want)
 	}
-	if want := []string{"ks", "locations", "--provider", "satellite", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
+	if want := []string{"ks", "zones", "--provider", "satellite", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
 		t.Fatalf("management location args = %#v, want %#v", fake.args, want)
 	}
 
@@ -164,7 +164,7 @@ func TestDiscoveryDecodesAndNormalizesJSON(t *testing.T) {
 	if want := []string{"us-south-1", "us-south-2"}; !reflect.DeepEqual(values, want) {
 		t.Fatalf("zones = %#v, want %#v", values, want)
 	}
-	if got := fake.args[:2]; !reflect.DeepEqual(got, []string{"ks", "locations"}) {
-		t.Fatalf("args = %#v", fake.args)
+	if want := []string{"ks", "zones", "--provider", "vpc-gen2", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
+		t.Fatalf("zone args = %#v, want %#v", fake.args, want)
 	}
 }

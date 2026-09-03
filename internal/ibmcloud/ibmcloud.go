@@ -81,7 +81,7 @@ func (d Discovery) ResourceGroups(ctx context.Context) ([]string, error) {
 }
 
 func (d Discovery) Zones(ctx context.Context) ([]string, error) {
-	return d.values(ctx, zonePattern.String(), "ks", "locations", "--provider", "vpc-gen2", "--output", "json", "-q")
+	return d.values(ctx, zonePattern.String(), "ks", "zones", "--provider", "vpc-gen2", "--output", "json", "-q")
 }
 
 func (d Discovery) Flavors(ctx context.Context, zone string) ([]string, error) {
@@ -90,7 +90,7 @@ func (d Discovery) Flavors(ctx context.Context, zone string) ([]string, error) {
 
 // ClassicDatacenters lists Classic locations available to the selected target.
 func (d Discovery) ClassicDatacenters(ctx context.Context) ([]string, error) {
-	return d.values(ctx, datacenterPattern.String(), "ks", "locations", "--provider", "classic", "--output", "json", "-q")
+	return d.values(ctx, datacenterPattern.String(), "ks", "zones", "--provider", "classic", "--output", "json", "-q")
 }
 
 // ClassicMachineTypes lists Classic worker machine types available in a data center.
@@ -100,7 +100,7 @@ func (d Discovery) ClassicMachineTypes(ctx context.Context, datacenter string) (
 
 // SatelliteManagedFrom lists the public management locations exposed by Satellite.
 func (d Discovery) SatelliteManagedFrom(ctx context.Context) ([]string, error) {
-	return d.values(ctx, managementPattern.String(), "ks", "locations", "--provider", "satellite", "--output", "json", "-q")
+	return d.values(ctx, managementPattern.String(), "ks", "zones", "--provider", "satellite", "--output", "json", "-q")
 }
 
 // SatelliteHostImages lists public RHEL images suitable for Satellite hosts.

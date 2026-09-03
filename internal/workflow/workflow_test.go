@@ -40,12 +40,12 @@ func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args .
 		return []byte(`[{"name":"fixture-group"}]`), nil
 	case "ks":
 		switch args[1] {
-		case "locations":
+		case "zones":
 			for _, arg := range args {
-				if arg == "classic" {
+				switch arg {
+				case "classic":
 					return []byte(`[{"name":"dal10"}]`), nil
-				}
-				if arg == "satellite" {
+				case "satellite":
 					return []byte(`[{"name":"us-south"}]`), nil
 				}
 			}
