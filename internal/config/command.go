@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bevicted/ict/internal/prompt"
 	"github.com/goccy/go-yaml"
 	"github.com/goccy/go-yaml/ast"
 	"github.com/goccy/go-yaml/parser"
+	"golang.org/x/term"
 )
 
 // ProcessRunner is the subprocess seam used by config commands that need an editor.
@@ -25,12 +25,13 @@ type ProcessRunner interface {
 
 // Runner wires command I/O and environment dependencies for config commands.
 type Runner struct {
-	Stdin    io.Reader
-	Stdout   io.Writer
-	Stderr   io.Writer
-	Environ  []string
-	Terminal func() bool
-	Process  ProcessRunner
+	Stdin      io.Reader
+	Stdout     io.Writer
+	Stderr     io.Writer
+	Environ    []string
+	Terminal   func() bool
+	IsTerminal func(int) bool
+	Process    ProcessRunner
 }
 
 // Show writes the complete effective configuration as canonical YAML.
@@ -481,5 +482,9 @@ func (r Runner) terminal() bool {
 	if r.Terminal != nil {
 		return r.Terminal()
 	}
-	return prompt.CanPrompt()
+	isTerminal := term.IsTerminal
+	if r.IsTerminal != nil {
+		isTerminal = r.IsTerminal
+	}
+	return isTerminal(int(os.Stdin.Fd()))
 }

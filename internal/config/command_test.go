@@ -409,7 +409,7 @@ func TestRunnerSetReportsMissingSourceAndUsesPrivateMode(t *testing.T) {
 	}
 }
 
-func TestRunnerEditRunsEditorAgainstPrivateDestination(t *testing.T) {
+func TestRunnerEditUsesEditorForTerminalStdinWithRedirectedStdout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config directory", "config file.yaml")
 	stdin := strings.NewReader("editor stdin")
 	var stdout, stderr bytes.Buffer
@@ -440,16 +440,25 @@ func TestRunnerEditRunsEditorAgainstPrivateDestination(t *testing.T) {
 		}
 		return os.WriteFile(path, []byte("malformed: [\n"), 0o600)
 	}}
+	stdinFD := int(os.Stdin.Fd())
 	runner := Runner{
-		Stdin:    stdin,
-		Stdout:   &stdout,
-		Stderr:   &stderr,
-		Environ:  []string{"EDITOR=fake-editor --wait"},
-		Terminal: func() bool { return true },
-		Process:  editor,
+		Stdin:   stdin,
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"EDITOR=fake-editor --wait"},
+		IsTerminal: func(fd int) bool {
+			if fd != stdinFD {
+				t.Errorf("terminal check used file descriptor %d, want stdin %d", fd, stdinFD)
+			}
+			return true
+		},
+		Process: editor,
 	}
 	if err := runner.Edit(ctx, path); err != nil {
 		t.Fatal(err)
+	}
+	if !editor.called {
+		t.Error("terminal stdin with redirected stdout did not invoke editor")
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
