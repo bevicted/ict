@@ -292,6 +292,13 @@ func (r Runner) Destroy(ctx context.Context) error {
 }
 
 func (r Runner) hasState(ctx context.Context, environ []string, workspace string) (bool, error) {
+	statePath := filepath.Join(workspace, "terraform.tfstate")
+	if _, err := os.Stat(statePath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("inspect Terraform state file: %w", err)
+	}
+
 	output, err := r.terraform().Run(ctx, environ, "terraform", "-chdir="+workspace, "state", "list")
 	if err != nil {
 		return false, err

@@ -160,6 +160,13 @@ func newRunner(workspace string, fake *fakeTerraform) Runner {
 	return Runner{Workspace: workspace, Terraform: fake, Terminal: func() bool { return false }, Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }, Suffix: func() string { return "deadbeef" }}
 }
 
+func writeTerraformState(t *testing.T, workspace string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(workspace, "terraform.tfstate"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func terraformActions(t *testing.T, calls [][]string) []string {
 	t.Helper()
 	actions := make([]string, 0, len(calls))
@@ -209,14 +216,56 @@ func TestInitialLifecycleTerraformActionOrder(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					want := "init, state list, " + action
+					want := "init, " + action
 					if action == "create" {
-						want = "init, state list, apply"
+						want = "init, apply"
 					}
 					if got := strings.Join(terraformActions(t, fake.calls), ", "); got != want {
 						t.Fatalf("%s first-run Terraform actions = %q, want %q", action, got, want)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestHasState(t *testing.T) {
+	tests := []struct {
+		name      string
+		stateFile bool
+		resources bool
+		stateErr  error
+		want      bool
+		wantErr   string
+		calls     int
+	}{
+		{name: "absent state", want: false},
+		{name: "existing empty state", stateFile: true, want: false, calls: 1},
+		{name: "existing non-empty state", stateFile: true, resources: true, want: true, calls: 1},
+		{name: "existing state-list error", stateFile: true, stateErr: errors.New("state unavailable"), wantErr: "state unavailable", calls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			if test.stateFile {
+				writeTerraformState(t, workspace)
+			}
+			fake := &fakeTerraform{resources: test.resources, stateErr: test.stateErr}
+			runner := newRunner(workspace, fake)
+
+			got, err := runner.hasState(context.Background(), nil, workspace)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("hasState error = %v, want %q", err, test.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("hasState = %t, want %t", got, test.want)
+			}
+			if len(fake.calls) != test.calls {
+				t.Fatalf("state-list calls = %#v, want %d", fake.calls, test.calls)
 			}
 		})
 	}
@@ -259,6 +308,7 @@ func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 	if err != nil || !strings.Contains(string(contextBytes), "override-vpc.example.invalid") {
 		t.Fatalf("recovery context = %q, %v", contextBytes, err)
 	}
+	writeTerraformState(t, workspace)
 	fake.resources = true
 	fake.calls = nil
 	if err := runner.Create(context.Background(), inputs); err != nil {
@@ -318,6 +368,7 @@ func TestClassicLifecyclePersistsAndOmitsVPCValues(t *testing.T) {
 			t.Fatalf("Classic tfvars missing %s", present)
 		}
 	}
+	writeTerraformState(t, workspace)
 	fake.resources = true
 	fake.calls = nil
 	if err := runner.Create(context.Background(), inputs); err != nil {
@@ -513,6 +564,7 @@ func TestDestroyRefusesEmptyState(t *testing.T) {
 	if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
 		t.Fatal(err)
 	}
+	writeTerraformState(t, workspace)
 	fake.calls = nil
 	if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "state has no managed resources") {
 		t.Fatalf("empty state destroy = %v", err)
@@ -777,6 +829,7 @@ func TestDestroyRestoresSavedEndpoints(t *testing.T) {
 			if err := runner.Plan(context.Background(), test.inputs(t)); err != nil {
 				t.Fatal(err)
 			}
+			writeTerraformState(t, runner.Workspace)
 			fake.resources = true
 			fake.calls, fake.environs = nil, nil
 			runner.Environ = test.currentEnv
@@ -807,6 +860,7 @@ func TestStateListFailuresRefusePlanAndCreateBeforePersistence(t *testing.T) {
 			for _, action := range []string{"plan", "create"} {
 				t.Run(action, func(t *testing.T) {
 					workspace := t.TempDir()
+					writeTerraformState(t, workspace)
 					fake := &fakeTerraform{stateErr: errors.New("state unavailable")}
 					runner := newRunner(workspace, fake)
 					runner.Environ = test.environ
@@ -895,6 +949,7 @@ func TestStateListFailuresRefuseDestroy(t *testing.T) {
 			if err := runner.Plan(context.Background(), test.inputs(t)); err != nil {
 				t.Fatal(err)
 			}
+			writeTerraformState(t, workspace)
 			fake.stateErr = errors.New("state unavailable")
 			fake.calls = nil
 			if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "inspect Terraform state: state unavailable") {

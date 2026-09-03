@@ -42,6 +42,7 @@ func TestSatelliteLifecyclePersistsWithoutPublicKeyLeak(t *testing.T) {
 	if !strings.Contains(string(contextBytes), "vpc.us-south.example.invalid") {
 		t.Fatal("Satellite recovery context did not retain the regional VPC endpoint")
 	}
+	writeTerraformState(t, workspace)
 	fake.resources = true
 	if err := runner.Create(context.Background(), inputs); err != nil {
 		t.Fatal(err)
