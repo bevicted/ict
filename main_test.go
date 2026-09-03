@@ -33,6 +33,8 @@ func TestPrintParseUsageForMissingCommand(t *testing.T) {
 		"plan [flags]",
 		"create [flags]",
 		"destroy",
+		"config show [flags]",
+		"config get <path> [flags]",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("usage does not contain %q:\n%s", want, output.String())

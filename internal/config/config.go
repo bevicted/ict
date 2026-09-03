@@ -64,21 +64,40 @@ type ResolvedTarget struct {
 
 // DiscoverPath resolves the required config file in precedence order.
 func DiscoverPath(explicit string) (string, error) {
+	return DiscoverPathFromEnvironment(explicit, os.Environ())
+}
+
+// DiscoverPathFromEnvironment resolves the required config file using environ.
+func DiscoverPathFromEnvironment(explicit string, environ []string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
-	if path := os.Getenv("ICT_CONFIG"); path != "" {
+	if path := environmentValue(environ, "ICT_CONFIG"); path != "" {
 		return path, nil
 	}
-	configHome := os.Getenv("XDG_CONFIG_HOME")
+	configHome := environmentValue(environ, "XDG_CONFIG_HOME")
 	if configHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("determine home directory: %w", err)
+		home := environmentValue(environ, "HOME")
+		if home == "" {
+			var err error
+			home, err = os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("determine home directory: %w", err)
+			}
 		}
 		configHome = filepath.Join(home, ".config")
 	}
 	return filepath.Join(configHome, "ict", "config.yaml"), nil
+}
+
+func environmentValue(environ []string, wanted string) string {
+	for index := len(environ) - 1; index >= 0; index-- {
+		key, value, found := strings.Cut(environ[index], "=")
+		if found && key == wanted {
+			return value
+		}
+	}
+	return ""
 }
 
 // LoadDiscovered resolves and loads the required configuration file.

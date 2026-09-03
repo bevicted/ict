@@ -31,6 +31,7 @@ targets:
       global_tagging: https://global-tagging.example.invalid
       resource_management: https://resource-management.example.invalid
       resource_controller: https://resource-controller.example.invalid
+      vpc: https://vpc.{region}.example.invalid
 `
 
 func writeConfig(t *testing.T, content string) string {

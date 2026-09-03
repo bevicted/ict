@@ -5,14 +5,16 @@ import (
 	"context"
 
 	"github.com/alecthomas/kong"
+	"github.com/bevicted/ict/internal/config"
 	"github.com/bevicted/ict/internal/workflow"
 )
 
 // CLI is the root command grammar.
 type CLI struct {
-	Plan    VPCCommand `cmd:"" help:"Create a non-mutating Terraform plan."`
-	Create  VPCCommand `cmd:"" help:"Create or safely resume a cluster."`
-	Destroy Destroy    `cmd:"" help:"Destroy only the currently managed cluster."`
+	Plan    VPCCommand    `cmd:"" help:"Create a non-mutating Terraform plan."`
+	Create  VPCCommand    `cmd:"" help:"Create or safely resume a cluster."`
+	Destroy Destroy       `cmd:"" help:"Destroy only the currently managed cluster."`
+	Config  ConfigCommand `cmd:"" help:"Inspect effective configuration."`
 }
 
 // VPCCommand contains the transient inputs shared by plan and create.
@@ -43,6 +45,23 @@ type VPCCommand struct {
 // Destroy deliberately accepts no replacement cluster inputs.
 type Destroy struct{}
 
+// ConfigCommand contains read-only configuration commands.
+type ConfigCommand struct {
+	Show ConfigShow `cmd:"" help:"Print the complete effective configuration as YAML."`
+	Get  ConfigGet  `cmd:"" help:"Print an effective configuration value by dot path."`
+}
+
+// ConfigShow contains options for config show.
+type ConfigShow struct {
+	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
+}
+
+// ConfigGet contains options for config get.
+type ConfigGet struct {
+	Path   string `arg:"" name:"path" help:"Dot-separated effective configuration path."`
+	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
+}
+
 // Parse parses args with Kong's standard CLI and ICT_* environment mapping.
 func Parse(args []string) (*kong.Context, *CLI, error) {
 	cli := &CLI{}
@@ -54,16 +73,30 @@ func Parse(args []string) (*kong.Context, *CLI, error) {
 	return parsed, cli, err
 }
 
-// Run dispatches the selected command through the workflow.
+// Runner wires lifecycle and configuration command dependencies.
+type Runner struct {
+	Workflow workflow.Runner
+	Config   config.Runner
+}
+
+// Run dispatches the selected command.
 func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
-	runner := workflow.Runner{}
+	return (Runner{}).Run(ctx, parsed, command)
+}
+
+// Run dispatches the selected command through its appropriate runner.
+func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 	switch parsed.Command() {
 	case "plan":
-		return runner.Plan(ctx, command.Plan.inputs())
+		return r.Workflow.Plan(ctx, command.Plan.inputs())
 	case "create":
-		return runner.Create(ctx, command.Create.inputs())
+		return r.Workflow.Create(ctx, command.Create.inputs())
 	case "destroy":
-		return runner.Destroy(ctx)
+		return r.Workflow.Destroy(ctx)
+	case "config show":
+		return r.Config.Show(command.Config.Show.Config)
+	case "config get <path>":
+		return r.Config.Get(command.Config.Get.Config, command.Config.Get.Path)
 	default:
 		return nil
 	}

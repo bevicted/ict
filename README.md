@@ -62,6 +62,19 @@ Target names are lowercase letters, digits, and hyphens. Every profile is valida
 
 Standard IBM Cloud endpoint variables override the selected profile after validation: `IBMCLOUD_IAM_API_ENDPOINT`, `IBMCLOUD_CS_API_ENDPOINT`, `IBMCLOUD_GT_API_ENDPOINT`, `IBMCLOUD_RESOURCE_MANAGEMENT_API_ENDPOINT`, `IBMCLOUD_RESOURCE_CONTROLLER_API_ENDPOINT`, `IBMCLOUD_IS_NG_API_ENDPOINT`, `IBMCLOUD_SATELLITE_API_ENDPOINT`, and `IBMCLOUD_SATELLITE_CONFIG_API_ENDPOINT`. There is no endpoint command-line override.
 
+### Inspect configuration
+
+Use `config show` to print the complete effective configuration, or `config get` to print one effective value by dot path:
+
+```sh
+ict config show [--config PATH]
+ict config get targets.example.endpoints.vpc [--config PATH]
+```
+
+These commands use the same configuration discovery order as lifecycle commands: `--config`, `ICT_CONFIG`, then `${XDG_CONFIG_HOME:-~/.config}/ict/config.yaml`. `show` prints canonical YAML. `get` prints scalar values without YAML quoting and with one trailing newline; maps and lists are printed as YAML. List items can be addressed by their zero-based index, for example `targets.example.providers.0`.
+
+The output is effective, not necessarily stored: ICT expands each target's VPC endpoint with that target's `default_region` and applies recognized endpoint environment overrides. Only the version 1 configuration fields are displayed; credential environment variables and password-manager data are not read or displayed.
+
 ## Lifecycle
 
 Use `plan` to review Terraform changes, `create` to apply them, and `destroy` only to destroy the saved active cluster. `create` and `destroy` use Terraform auto-approval, so review a plan first.

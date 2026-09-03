@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,5 +76,60 @@ func TestDestroyRejectsReplacementInputs(t *testing.T) {
 	_, _, err := Parse([]string{"destroy", "--name", "replacement"})
 	if err == nil {
 		t.Fatal("destroy accepted replacement input")
+	}
+}
+
+func TestConfigCommandsParseAndDispatchWithoutWorkflow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`version: 1
+targets:
+  example:
+    providers: [classic]
+    default_region: us-south
+    endpoints:
+      iam: https://iam.example.invalid
+      container_service: https://containers.example.invalid
+      global_tagging: https://global-tagging.example.invalid
+      resource_management: https://resource-management.example.invalid
+      resource_controller: https://resource-controller.example.invalid
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, command, err := Parse([]string{"config", "get", "targets.example.endpoints.iam", "--config", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Command(); got != "config get <path>" {
+		t.Fatalf("parsed command = %q", got)
+	}
+	if command.Config.Get.Config != path || command.Config.Get.Path != "targets.example.endpoints.iam" {
+		t.Fatalf("config get = %#v", command.Config.Get)
+	}
+	var output bytes.Buffer
+	if err := (Runner{Config: config.Runner{Stdout: &output}}).Run(context.Background(), parsed, command); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "https://iam.example.invalid\n" {
+		t.Fatalf("config get output = %q", got)
+	}
+
+	t.Setenv("ICT_CONFIG", path)
+	parsed, command, err = Parse([]string{"config", "show"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Command(); got != "config show" {
+		t.Fatalf("parsed command = %q", got)
+	}
+	if command.Config.Show.Config != path {
+		t.Fatalf("config show path = %q, want %q", command.Config.Show.Config, path)
+	}
+	output.Reset()
+	if err := (Runner{Config: config.Runner{Stdout: &output}}).Run(context.Background(), parsed, command); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "version: 1\n") {
+		t.Fatalf("config show output = %q", output.String())
 	}
 }
