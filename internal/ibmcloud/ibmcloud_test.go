@@ -34,6 +34,44 @@ func TestResourceGroupsUseOnlyTopLevelNames(t *testing.T) {
 	}
 }
 
+func TestVersionsDecodeStructuredJSON(t *testing.T) {
+	tests := []struct {
+		platform string
+		output   string
+		want     []string
+		service  string
+	}{
+		{
+			platform: "kubernetes",
+			output:   `{"kubernetes":[{"major":1,"minor":36,"patch":4},{"major":1,"minor":37,"patch":0}]}`,
+			want:     []string{"1.36.4", "1.37.0"},
+			service:  "Kubernetes",
+		},
+		{
+			platform: "openshift",
+			output:   `{"openshift":[{"major":4,"minor":21,"patch":29},{"major":5,"minor":0,"patch":0}]}`,
+			want:     []string{"4.21.29_openshift", "5.0.0_openshift"},
+			service:  "OpenShift",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.platform, func(t *testing.T) {
+			fake := &fakeRunner{output: []byte(test.output)}
+			values, err := (Discovery{Runner: fake}).Versions(context.Background(), test.platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(values, test.want) {
+				t.Fatalf("versions = %#v, want %#v", values, test.want)
+			}
+			wantArgs := []string{"ks", "versions", "--show-version", test.service, "--output", "json", "-q"}
+			if !reflect.DeepEqual(fake.args, wantArgs) {
+				t.Fatalf("version args = %#v, want %#v", fake.args, wantArgs)
+			}
+		})
+	}
+}
+
 func TestClassicDiscoveryUsesClassicCommands(t *testing.T) {
 	fake := &fakeRunner{output: []byte(`[{"name":"dal10"},{"name":"not-a-datacenter"}]`)}
 	values, err := (Discovery{Runner: fake}).ClassicDatacenters(context.Background())

@@ -51,7 +51,7 @@ func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args .
 			}
 			return []byte(`[{"name":"us-south-1"},{"name":"us-south-2"},{"name":"us-south-3"}]`), nil
 		case "versions":
-			return []byte(`[{"version":"1.31.9"}]`), nil
+			return []byte(`{"kubernetes":[{"major":1,"minor":31,"patch":9}],"openshift":[{"major":4,"minor":17,"patch":3}]}`), nil
 		case "flavor":
 			return []byte(`[{"name":"bx2.2x8"}]`), nil
 		}

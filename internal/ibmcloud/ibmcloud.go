@@ -110,10 +110,34 @@ func (d Discovery) SatelliteHostProfiles(ctx context.Context) ([]string, error) 
 
 func (d Discovery) Versions(ctx context.Context, platform string) ([]string, error) {
 	service := "Kubernetes"
+	responseKey := "kubernetes"
+	suffix := ""
 	if platform == "openshift" {
 		service = "OpenShift"
+		responseKey = "openshift"
+		suffix = "_openshift"
 	}
-	return d.values(ctx, `^[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:_openshift)?$`, "ks", "versions", "--show-version", service, "--output", "json", "-q")
+	if d.Runner == nil {
+		d.Runner = CommandRunner{}
+	}
+	data, err := d.Runner.Run(ctx, d.Environ, "ibmcloud", "ks", "versions", "--show-version", service, "--output", "json", "-q")
+	if err != nil {
+		return nil, err
+	}
+	var response map[string][]struct {
+		Major int `json:"major"`
+		Minor int `json:"minor"`
+		Patch int `json:"patch"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("decode ibmcloud versions JSON: %w", err)
+	}
+	versions := response[responseKey]
+	values := make([]string, 0, len(versions))
+	for _, version := range versions {
+		values = append(values, fmt.Sprintf("%d.%d.%d%s", version.Major, version.Minor, version.Patch, suffix))
+	}
+	return values, nil
 }
 
 func (d Discovery) values(ctx context.Context, expression string, args ...string) ([]string, error) {
