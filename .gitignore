@@ -1,0 +1,26 @@
+# Terraform runtime data and state
+.terraform/
+**/.terraform/
+.cluster/
+**/.cluster/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+*.plan
+*.plan.*
+
+# Private configuration and secrets
+config.yaml
+config.local.yaml
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Locally built binaries
+ict
+ict.exe
+bin/

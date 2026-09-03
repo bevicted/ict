@@ -1,0 +1,17 @@
+version: 1
+targets:
+  example:
+    providers:
+      - vpc-gen2
+      - classic
+      - satellite
+    default_region: us-south
+    endpoints:
+      iam: https://iam.example.invalid
+      container_service: https://containers.example.invalid
+      global_tagging: https://global-tagging.example.invalid
+      resource_management: https://resource-management.example.invalid
+      resource_controller: https://resource-controller.example.invalid
+      vpc: https://vpc.{region}.example.invalid
+      satellite: https://satellite.example.invalid
+      satellite_config: https://satellite-config.example.invalid
