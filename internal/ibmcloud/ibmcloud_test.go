@@ -38,6 +38,27 @@ func TestCommandRunnerReportsIBMCloudOutputOnFailure(t *testing.T) {
 	}
 }
 
+func TestCommandRunnerScopesContainerServiceEndpoint(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "ibmcloud")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf '%s' \"$IKS_API_CS_ENDPOINT\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+
+	environ := append(os.Environ(),
+		"IBMCLOUD_CS_API_ENDPOINT=https://containers.example.invalid/global",
+		"IKS_API_CS_ENDPOINT=https://stale.example.invalid",
+	)
+	output, err := (CommandRunner{}).Run(context.Background(), environ, "ibmcloud")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(output), "https://containers.example.invalid"; got != want {
+		t.Fatalf("IKS API endpoint = %q, want %q", got, want)
+	}
+}
+
 func TestResourceGroupsUseOnlyTopLevelNames(t *testing.T) {
 	fake := &fakeRunner{output: []byte(`[
 		{"name":"group with spaces","id":"unrelated identifier","metadata":{"name":"nested group"}},
@@ -121,15 +142,20 @@ func TestClassicDiscoveryUsesClassicCommands(t *testing.T) {
 }
 
 func TestSatelliteDiscoveryUsesJSONCommands(t *testing.T) {
-	fake := &fakeRunner{output: []byte(`[{"name":"us-south"},{"name":"not a location"}]`)}
+	fake := &fakeRunner{output: []byte(`[
+		{"id":"dal","name":"dal","kind":"metro","satelliteEnabled":true},
+		{"id":"wdc","name":"wdc","kind":"metro","satelliteEnabled":false},
+		{"id":"us-south-1","name":"us-south-1","kind":"zone","metro":"dal","satelliteEnabled":true},
+		{"id":"unrelated","name":"arbitrary string","kind":"country","satelliteEnabled":true}
+	]`)}
 	values, err := (Discovery{Runner: fake}).SatelliteManagedFrom(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"us-south"}; !reflect.DeepEqual(values, want) {
+	if want := []string{"dal"}; !reflect.DeepEqual(values, want) {
 		t.Fatalf("management locations = %#v, want %#v", values, want)
 	}
-	if want := []string{"ks", "zones", "--provider", "satellite", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
+	if want := []string{"ks", "locations", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
 		t.Fatalf("management location args = %#v, want %#v", fake.args, want)
 	}
 

@@ -33,7 +33,7 @@ func (CommandRunner) Run(ctx context.Context, environ []string, command string, 
 		return nil, fmt.Errorf("unsupported discovery command %q", command)
 	}
 	cmd := exec.CommandContext(ctx, "ibmcloud", args...)
-	cmd.Env = environ
+	cmd.Env = commandEnvironment(environ)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -100,7 +100,40 @@ func (d Discovery) ClassicMachineTypes(ctx context.Context, datacenter string) (
 
 // SatelliteManagedFrom lists the public management locations exposed by Satellite.
 func (d Discovery) SatelliteManagedFrom(ctx context.Context) ([]string, error) {
-	return d.values(ctx, managementPattern.String(), "ks", "zones", "--provider", "satellite", "--output", "json", "-q")
+	if d.Runner == nil {
+		d.Runner = CommandRunner{}
+	}
+	data, err := d.Runner.Run(ctx, d.Environ, "ibmcloud", "ks", "locations", "--output", "json", "-q")
+	if err != nil {
+		return nil, err
+	}
+	var locations []struct {
+		ID               string `json:"id"`
+		Kind             string `json:"kind"`
+		Metro            string `json:"metro"`
+		SatelliteEnabled bool   `json:"satelliteEnabled"`
+	}
+	if err := json.Unmarshal(data, &locations); err != nil {
+		return nil, fmt.Errorf("decode ibmcloud locations JSON: %w", err)
+	}
+	seen := map[string]struct{}{}
+	for _, location := range locations {
+		if !location.SatelliteEnabled {
+			continue
+		}
+		if location.Kind == "metro" && managementPattern.MatchString(location.ID) {
+			seen[location.ID] = struct{}{}
+		}
+		if managementPattern.MatchString(location.Metro) {
+			seen[location.Metro] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(seen))
+	for value := range seen {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values, nil
 }
 
 // SatelliteHostImages lists public RHEL images suitable for Satellite hosts.
@@ -170,6 +203,29 @@ func (d Discovery) values(ctx context.Context, expression string, args ...string
 	}
 	sort.Strings(values)
 	return values, nil
+}
+
+func commandEnvironment(environ []string) []string {
+	values := make(map[string]string, len(environ)+1)
+	for _, entry := range environ {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			values[key] = value
+		}
+	}
+	if endpoint := values["IBMCLOUD_CS_API_ENDPOINT"]; endpoint != "" {
+		endpoint = strings.TrimRight(endpoint, "/")
+		values["IKS_API_CS_ENDPOINT"] = strings.TrimSuffix(endpoint, "/global")
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, key+"="+values[key])
+	}
+	return result
 }
 
 func collectStrings(value any, visit func(string)) {

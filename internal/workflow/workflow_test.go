@@ -40,13 +40,12 @@ func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args .
 		return []byte(`[{"name":"fixture-group"}]`), nil
 	case "ks":
 		switch args[1] {
+		case "locations":
+			return []byte(`[{"id":"dal","name":"dal","kind":"metro","satelliteEnabled":true}]`), nil
 		case "zones":
 			for _, arg := range args {
-				switch arg {
-				case "classic":
+				if arg == "classic" {
 					return []byte(`[{"name":"dal10"}]`), nil
-				case "satellite":
-					return []byte(`[{"name":"us-south"}]`), nil
 				}
 			}
 			return []byte(`[{"name":"us-south-1"},{"name":"us-south-2"},{"name":"us-south-3"}]`), nil
@@ -138,7 +137,7 @@ func configuredSatelliteInputs(t *testing.T) Inputs {
 	inputs.Zone, inputs.Flavor = "", ""
 	inputs.Name = "fixture-satellite"
 	inputs.SatelliteZones = []string{"us-south-1", "us-south-2", "us-south-3"}
-	inputs.SatelliteManagedFrom = "us-south"
+	inputs.SatelliteManagedFrom = "dal"
 	inputs.SatelliteHostImage = "rhel-8-synthetic"
 	inputs.SatelliteSSHPublicKeyPath = keyPath
 	return inputs
