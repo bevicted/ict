@@ -9,10 +9,16 @@ ICT is a Go command-line tool for planning, creating, and explicitly destroying 
 - IBM Cloud CLI on `PATH`, authenticated for the selected target.
 - `fzf` only when ICT must interactively select omitted inputs in a terminal. Fully specified commands do not invoke or require `fzf` or IBM Cloud CLI discovery.
 
-Build from a source checkout:
+Install the latest release directly:
 
 ```sh
-go build -o ict ./cmd/ict
+go install github.com/bevicted/ict@latest
+```
+
+Or build from a source checkout:
+
+```sh
+go build -o ict .
 ```
 
 Then run the binary as `./ict` or place it on `PATH` as `ict`.
