@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	zonePattern   = regexp.MustCompile(`^[a-z]+(?:-[a-z]+)+-[0-9]+$`)
-	flavorPattern = regexp.MustCompile(`^[a-z][a-z0-9.-]*[0-9]x[0-9]+$`)
+	zonePattern       = regexp.MustCompile(`^[a-z]+(?:-[a-z]+)+-[0-9]+$`)
+	datacenterPattern = regexp.MustCompile(`^[a-z]+[0-9]+$`)
+	flavorPattern     = regexp.MustCompile(`^[a-z][a-z0-9.-]*[0-9]x[0-9]+$`)
 )
 
 // Runner executes a command with a scoped environment.
@@ -52,6 +53,16 @@ func (d Discovery) Zones(ctx context.Context) ([]string, error) {
 
 func (d Discovery) Flavors(ctx context.Context, zone string) ([]string, error) {
 	return d.values(ctx, flavorPattern.String(), "ks", "flavor", "ls", "--zone", zone, "--provider", "vpc-gen2", "--output", "json", "-q")
+}
+
+// ClassicDatacenters lists Classic locations available to the selected target.
+func (d Discovery) ClassicDatacenters(ctx context.Context) ([]string, error) {
+	return d.values(ctx, datacenterPattern.String(), "ks", "locations", "--provider", "classic", "--output", "json", "-q")
+}
+
+// ClassicMachineTypes lists Classic worker machine types available in a data center.
+func (d Discovery) ClassicMachineTypes(ctx context.Context, datacenter string) ([]string, error) {
+	return d.values(ctx, flavorPattern.String(), "ks", "flavor", "ls", "--zone", datacenter, "--provider", "classic", "--output", "json", "-q")
 }
 
 func (d Discovery) Versions(ctx context.Context, platform string) ([]string, error) {

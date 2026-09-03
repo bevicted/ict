@@ -10,21 +10,25 @@ import (
 
 // CLI is the root command grammar.
 type CLI struct {
-	Plan    VPCCommand `cmd:"" help:"Create a non-mutating VPC Terraform plan."`
-	Create  VPCCommand `cmd:"" help:"Create or safely resume a VPC cluster."`
+	Plan    VPCCommand `cmd:"" help:"Create a non-mutating Terraform plan."`
+	Create  VPCCommand `cmd:"" help:"Create or safely resume a cluster."`
 	Destroy Destroy    `cmd:"" help:"Destroy only the currently managed cluster."`
 }
 
-// VPCCommand contains the transient VPC inputs shared by plan and create.
+// VPCCommand contains the transient inputs shared by plan and create.
 type VPCCommand struct {
 	Config        string `help:"Target configuration file." type:"path" env:"ICT_CONFIG"`
 	Target        string `help:"Configured target name." env:"ICT_TARGET"`
-	Provider      string `help:"Cluster provider (vpc-gen2)." default:"vpc-gen2" env:"ICT_PROVIDER"`
+	Provider      string `help:"Cluster provider (vpc-gen2 or classic)." env:"ICT_PROVIDER"`
 	Platform      string `help:"Cluster platform (kubernetes or openshift)." env:"ICT_PLATFORM"`
 	Version       string `help:"Kubernetes or OpenShift version." env:"ICT_VERSION"`
 	ResourceGroup string `help:"Existing resource group name." env:"ICT_RESOURCE_GROUP"`
 	Zone          string `help:"VPC zone." env:"ICT_ZONE"`
 	Flavor        string `help:"VPC worker flavor." env:"ICT_FLAVOR"`
+	Datacenter    string `help:"Classic data center." env:"ICT_DATACENTER"`
+	MachineType   string `help:"Classic worker machine type." env:"ICT_MACHINE_TYPE"`
+	PublicVLANID  string `name:"public-vlan-id" help:"Existing numeric Classic public VLAN ID." env:"ICT_PUBLIC_VLAN_ID"`
+	PrivateVLANID string `name:"private-vlan-id" help:"Existing numeric Classic private VLAN ID." env:"ICT_PRIVATE_VLAN_ID"`
 	WorkerCount   int    `help:"Worker count." env:"ICT_WORKER_COUNT"`
 	Owner         string `help:"Owner used when generating a name." env:"ICT_OWNER"`
 	Name          string `help:"Explicit cluster name." env:"ICT_NAME"`
@@ -60,5 +64,5 @@ func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name}
 }

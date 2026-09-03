@@ -24,13 +24,16 @@ import (
 )
 
 var (
-	zonePattern    = regexp.MustCompile(`^[a-z]+(?:-[a-z]+)+-[0-9]+$`)
-	flavorPattern  = regexp.MustCompile(`^[a-z][a-z0-9.-]*[0-9]x[0-9]+$`)
-	clusterPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	versionPattern = regexp.MustCompile(`^([0-9]+)\.([0-9]+)(?:\.[0-9]+)?(?:_openshift)?$`)
+	zonePattern           = regexp.MustCompile(`^[a-z]+(?:-[a-z]+)+-[0-9]+$`)
+	datacenterPattern     = regexp.MustCompile(`^[a-z]+[0-9]+$`)
+	flavorPattern         = regexp.MustCompile(`^[a-z][a-z0-9.-]*[0-9]x[0-9]+$`)
+	vpcClusterPattern     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	classicClusterPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,34}$`)
+	vlanPattern           = regexp.MustCompile(`^[0-9]+$`)
+	versionPattern        = regexp.MustCompile(`^([0-9]+)\.([0-9]+)(?:\.[0-9]+)?(?:_openshift)?$`)
 )
 
-// Inputs are transient VPC plan/create options.
+// Inputs are transient plan/create options.
 type Inputs struct {
 	ConfigPath    string
 	Target        string
@@ -40,6 +43,10 @@ type Inputs struct {
 	ResourceGroup string
 	Zone          string
 	Flavor        string
+	Datacenter    string
+	MachineType   string
+	PublicVLANID  string
+	PrivateVLANID string
 	WorkerCount   int
 	Owner         string
 	Name          string
@@ -54,8 +61,12 @@ type Values struct {
 	Platform          string `json:"platform"`
 	KubeVersion       string `json:"kube_version"`
 	WorkerCount       int    `json:"worker_count"`
-	Zone              string `json:"zone"`
-	Flavor            string `json:"flavor"`
+	Zone              string `json:"zone,omitempty"`
+	Flavor            string `json:"flavor,omitempty"`
+	Datacenter        string `json:"datacenter,omitempty"`
+	MachineType       string `json:"machine_type,omitempty"`
+	PublicVLANID      string `json:"public_vlan_id,omitempty"`
+	PrivateVLANID     string `json:"private_vlan_id,omitempty"`
 }
 
 // RecoveryContext holds exactly the non-secret data needed to safely destroy the active state.
@@ -166,6 +177,11 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 	if err != nil {
 		return err
 	}
+	if values.ClusterMode == "classic" {
+		if err := requireClassicCredentials(r.baseEnvironment()); err != nil {
+			return err
+		}
+	}
 	workspace, err := r.workspace()
 	if err != nil {
 		return err
@@ -226,6 +242,11 @@ func (r Runner) Destroy(ctx context.Context) error {
 		return err
 	}
 	environment := r.environment(config.ResolvedTarget{Target: config.Target{Endpoints: recovery.Endpoints}}.Environment())
+	if recovery.Values.ClusterMode == "classic" {
+		if err := requireClassicCredentials(r.baseEnvironment()); err != nil {
+			return err
+		}
+	}
 	if !r.hasState(ctx, environment, workspace) {
 		return errors.New("Terraform state has no managed resources; refusing destroy")
 	}
@@ -242,33 +263,38 @@ func (r Runner) hasState(ctx context.Context, environ []string, workspace string
 }
 
 func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs) (Values, config.ResolvedTarget, error) {
-	missing := missingFields(supplied)
-	if len(missing) > 0 {
-		if !r.terminal() {
-			return Values{}, config.ResolvedTarget{}, &prompt.MissingInputError{Fields: missing}
+	var err error
+	if missing := selectionMissingFields(supplied); len(missing) > 0 {
+		if err := r.requirePrompt(missing); err != nil {
+			return Values{}, config.ResolvedTarget{}, err
 		}
-		if _, err := exec.LookPath("fzf"); err != nil {
-			return Values{}, config.ResolvedTarget{}, &prompt.MissingInputError{Fields: missing}
-		}
-		var err error
-		supplied, err = r.discover(ctx, cfg, supplied)
+		supplied, err = r.selectTargetAndProvider(ctx, cfg, supplied)
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
-		missing = missingFields(supplied)
-		if len(missing) > 0 {
-			return Values{}, config.ResolvedTarget{}, &prompt.MissingInputError{Fields: missing}
-		}
-	}
-	if supplied.Provider != string(config.ProviderVPCGen2) {
-		return Values{}, config.ResolvedTarget{}, fmt.Errorf("provider %q is not supported by this VPC lifecycle", supplied.Provider)
 	}
 	targetProfile, err := cfg.Target(supplied.Target)
 	if err != nil {
 		return Values{}, config.ResolvedTarget{}, err
 	}
-	if !containsProvider(targetProfile.Providers, config.ProviderVPCGen2) {
+	provider := config.Provider(supplied.Provider)
+	if !containsProvider(targetProfile.Providers, provider) {
 		return Values{}, config.ResolvedTarget{}, fmt.Errorf("target %q does not support provider %q", supplied.Target, supplied.Provider)
+	}
+	if provider != config.ProviderVPCGen2 && provider != config.ProviderClassic {
+		return Values{}, config.ResolvedTarget{}, fmt.Errorf("provider %q is not supported by this lifecycle", supplied.Provider)
+	}
+	if missing := missingFields(supplied); len(missing) > 0 {
+		if err := r.requirePrompt(missing); err != nil {
+			return Values{}, config.ResolvedTarget{}, err
+		}
+		supplied, err = r.discover(ctx, cfg, supplied)
+		if err != nil {
+			return Values{}, config.ResolvedTarget{}, err
+		}
+		if missing := missingFields(supplied); len(missing) > 0 {
+			return Values{}, config.ResolvedTarget{}, &prompt.MissingInputError{Fields: missing}
+		}
 	}
 	if supplied.Platform != "kubernetes" && supplied.Platform != "openshift" {
 		return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid platform %q", supplied.Platform)
@@ -277,70 +303,118 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 	if err != nil {
 		return Values{}, config.ResolvedTarget{}, err
 	}
-	if !zonePattern.MatchString(supplied.Zone) {
-		return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid zone %q", supplied.Zone)
-	}
-	if !flavorPattern.MatchString(supplied.Flavor) {
-		return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid flavor %q", supplied.Flavor)
-	}
 	if strings.TrimSpace(supplied.ResourceGroup) == "" {
 		return Values{}, config.ResolvedTarget{}, errors.New("resource group is required")
-	}
-	region := strings.TrimSuffix(supplied.Zone, "-"+supplied.Zone[strings.LastIndex(supplied.Zone, "-")+1:])
-	target, err := cfg.ResolveTargetForRegion(supplied.Target, region, r.baseEnvironment())
-	if err != nil {
-		return Values{}, config.ResolvedTarget{}, err
 	}
 	workers := supplied.WorkerCount
 	if workers == 0 {
 		workers = 1
 		if supplied.Platform == "openshift" {
 			workers = 2
+			if provider == config.ProviderClassic {
+				workers = 3
+			}
 		}
 	}
 	if workers < 1 {
 		return Values{}, config.ResolvedTarget{}, errors.New("worker count must be at least one")
 	}
-	name := supplied.Name
-	if name == "" {
-		ownerInput := supplied.Owner
-		if ownerInput == "" {
-			ownerInput = environmentValue(r.baseEnvironment(), "USER")
-			if ownerInput == "" {
-				ownerInput = "user"
-			}
+	name, err := r.resolveName(supplied)
+	if err != nil {
+		return Values{}, config.ResolvedTarget{}, err
+	}
+
+	switch provider {
+	case config.ProviderVPCGen2:
+		if !zonePattern.MatchString(supplied.Zone) {
+			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid zone %q", supplied.Zone)
 		}
-		owner, err := normalizeOwner(ownerInput)
+		if !flavorPattern.MatchString(supplied.Flavor) {
+			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid flavor %q", supplied.Flavor)
+		}
+		if !vpcClusterPattern.MatchString(name) {
+			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid name %q", name)
+		}
+		region := strings.TrimSuffix(supplied.Zone, "-"+supplied.Zone[strings.LastIndex(supplied.Zone, "-")+1:])
+		target, err := cfg.ResolveTargetForRegion(supplied.Target, region, r.baseEnvironment())
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
-		now := time.Now().UTC()
-		if r.Now != nil {
-			now = r.Now().UTC()
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor}, target, nil
+	case config.ProviderClassic:
+		if !datacenterPattern.MatchString(supplied.Datacenter) {
+			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid datacenter %q", supplied.Datacenter)
 		}
-		var suffix string
-		if r.Suffix != nil {
-			suffix = r.Suffix()
-		} else {
-			suffix, err = randomSuffix()
-			if err != nil {
-				return Values{}, config.ResolvedTarget{}, err
-			}
+		if !flavorPattern.MatchString(supplied.MachineType) {
+			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid machine type %q", supplied.MachineType)
 		}
-		name = generatedName(owner, now, suffix)
+		if !vlanPattern.MatchString(supplied.PublicVLANID) {
+			return Values{}, config.ResolvedTarget{}, errors.New("public VLAN ID must be a numeric Classic VLAN ID")
+		}
+		if !vlanPattern.MatchString(supplied.PrivateVLANID) {
+			return Values{}, config.ResolvedTarget{}, errors.New("private VLAN ID must be a numeric Classic VLAN ID")
+		}
+		if !classicClusterPattern.MatchString(name) {
+			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid name %q", name)
+		}
+		target, err := cfg.ResolveTarget(supplied.Target, r.baseEnvironment())
+		if err != nil {
+			return Values{}, config.ResolvedTarget{}, err
+		}
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: target.DefaultRegion, ClusterMode: "classic", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Datacenter: supplied.Datacenter, MachineType: supplied.MachineType, PublicVLANID: supplied.PublicVLANID, PrivateVLANID: supplied.PrivateVLANID}, target, nil
+	default:
+		return Values{}, config.ResolvedTarget{}, fmt.Errorf("provider %q is not supported by this lifecycle", supplied.Provider)
 	}
-	if !clusterPattern.MatchString(name) {
-		return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid name %q", name)
-	}
-	return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor}, target, nil
 }
 
-func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (Inputs, error) {
+func (r Runner) resolveName(supplied Inputs) (string, error) {
+	name := supplied.Name
+	if name != "" {
+		return name, nil
+	}
+	ownerInput := supplied.Owner
+	if ownerInput == "" {
+		ownerInput = environmentValue(r.baseEnvironment(), "USER")
+		if ownerInput == "" {
+			ownerInput = "user"
+		}
+	}
+	owner, err := normalizeOwner(ownerInput)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC()
+	if r.Now != nil {
+		now = r.Now().UTC()
+	}
+	if r.Suffix != nil {
+		return generatedName(owner, now, r.Suffix()), nil
+	}
+	suffix, err := randomSuffix()
+	if err != nil {
+		return "", err
+	}
+	return generatedName(owner, now, suffix), nil
+}
+
+func (r Runner) requirePrompt(fields []string) error {
+	if !r.terminal() {
+		return &prompt.MissingInputError{Fields: fields}
+	}
+	if _, err := exec.LookPath("fzf"); err != nil {
+		return &prompt.MissingInputError{Fields: fields}
+	}
+	return nil
+}
+
+func (r Runner) selectTargetAndProvider(ctx context.Context, cfg *config.Config, in Inputs) (Inputs, error) {
 	choose := func(label string, values []string) (string, error) { return prompt.Select(ctx, label, values) }
 	if in.Target == "" {
 		names := make([]string, 0, len(cfg.Targets))
-		for name := range cfg.Targets {
-			names = append(names, name)
+		for name, target := range cfg.Targets {
+			if in.Provider == "" || containsProvider(target.Providers, config.Provider(in.Provider)) {
+				names = append(names, name)
+			}
 		}
 		sort.Strings(names)
 		value, err := choose("target", names)
@@ -350,12 +424,26 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 		in.Target = value
 	}
 	if in.Provider == "" {
-		value, err := choose("provider", []string{string(config.ProviderVPCGen2)})
+		target, err := cfg.Target(in.Target)
+		if err != nil {
+			return in, err
+		}
+		providers := make([]string, 0, len(target.Providers))
+		for _, provider := range target.Providers {
+			providers = append(providers, string(provider))
+		}
+		sort.Strings(providers)
+		value, err := choose("provider", providers)
 		if err != nil {
 			return in, err
 		}
 		in.Provider = value
 	}
+	return in, nil
+}
+
+func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (Inputs, error) {
+	choose := func(label string, values []string) (string, error) { return prompt.Select(ctx, label, values) }
 	if in.Platform == "" {
 		value, err := choose("platform", []string{"kubernetes", "openshift"})
 		if err != nil {
@@ -379,17 +467,6 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 		}
 		in.ResourceGroup = value
 	}
-	if in.Zone == "" {
-		values, err := d.Zones(ctx)
-		if err != nil {
-			return in, err
-		}
-		value, err := choose("zone", values)
-		if err != nil {
-			return in, err
-		}
-		in.Zone = value
-	}
 	if in.Version == "" {
 		values, err := d.Versions(ctx, in.Platform)
 		if err != nil {
@@ -401,28 +478,102 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 		}
 		in.Version = value
 	}
-	if in.Flavor == "" {
-		values, err := d.Flavors(ctx, in.Zone)
-		if err != nil {
-			return in, err
+	switch config.Provider(in.Provider) {
+	case config.ProviderVPCGen2:
+		if in.Zone == "" {
+			values, err := d.Zones(ctx)
+			if err != nil {
+				return in, err
+			}
+			value, err := choose("zone", values)
+			if err != nil {
+				return in, err
+			}
+			in.Zone = value
 		}
-		value, err := choose("flavor", values)
-		if err != nil {
-			return in, err
+		if in.Flavor == "" {
+			values, err := d.Flavors(ctx, in.Zone)
+			if err != nil {
+				return in, err
+			}
+			value, err := choose("flavor", values)
+			if err != nil {
+				return in, err
+			}
+			in.Flavor = value
 		}
-		in.Flavor = value
+	case config.ProviderClassic:
+		if in.Datacenter == "" {
+			values, err := d.ClassicDatacenters(ctx)
+			if err != nil {
+				return in, err
+			}
+			value, err := choose("datacenter", values)
+			if err != nil {
+				return in, err
+			}
+			in.Datacenter = value
+		}
+		if in.MachineType == "" {
+			values, err := d.ClassicMachineTypes(ctx, in.Datacenter)
+			if err != nil {
+				return in, err
+			}
+			value, err := choose("machine type", values)
+			if err != nil {
+				return in, err
+			}
+			in.MachineType = value
+		}
 	}
 	return in, nil
 }
 
-func missingFields(in Inputs) []string {
-	fields := make([]string, 0, 7)
-	for _, field := range []struct{ name, value string }{{"target", in.Target}, {"provider", in.Provider}, {"platform", in.Platform}, {"version", in.Version}, {"resource-group", in.ResourceGroup}, {"zone", in.Zone}, {"flavor", in.Flavor}} {
+func selectionMissingFields(in Inputs) []string {
+	fields := make([]string, 0, 2)
+	for _, field := range []struct{ name, value string }{{"target", in.Target}, {"provider", in.Provider}} {
 		if field.value == "" {
 			fields = append(fields, field.name)
 		}
 	}
 	return fields
+}
+
+func missingFields(in Inputs) []string {
+	fields := make([]string, 0, 7)
+	for _, field := range []struct{ name, value string }{{"platform", in.Platform}, {"version", in.Version}, {"resource-group", in.ResourceGroup}} {
+		if field.value == "" {
+			fields = append(fields, field.name)
+		}
+	}
+	switch config.Provider(in.Provider) {
+	case config.ProviderVPCGen2:
+		for _, field := range []struct{ name, value string }{{"zone", in.Zone}, {"flavor", in.Flavor}} {
+			if field.value == "" {
+				fields = append(fields, field.name)
+			}
+		}
+	case config.ProviderClassic:
+		for _, field := range []struct{ name, value string }{{"datacenter", in.Datacenter}, {"machine-type", in.MachineType}, {"public-vlan-id", in.PublicVLANID}, {"private-vlan-id", in.PrivateVLANID}} {
+			if field.value == "" {
+				fields = append(fields, field.name)
+			}
+		}
+	}
+	return fields
+}
+
+func requireClassicCredentials(environ []string) error {
+	missing := make([]string, 0, 2)
+	for _, name := range []string{"IAAS_CLASSIC_USERNAME", "IAAS_CLASSIC_API_KEY"} {
+		if environmentValue(environ, name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("Classic operations require %s in the environment", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func environmentValue(environ []string, wanted string) string {
@@ -481,7 +632,7 @@ func truncate(value string, length int) string {
 func writeJSON(path string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal runtime values: %w", err)
 	}
 	return ictterraform.AtomicWrite(path, append(data, '\n'))
 }

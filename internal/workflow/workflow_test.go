@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bevicted/ict/internal/config"
 	"github.com/bevicted/ict/internal/prompt"
 	ictterraform "github.com/bevicted/ict/internal/terraform"
 )
@@ -31,6 +32,11 @@ func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args .
 	case "ks":
 		switch args[1] {
 		case "locations":
+			for _, arg := range args {
+				if arg == "classic" {
+					return []byte(`[{"name":"dal10"}]`), nil
+				}
+			}
 			return []byte(`[{"name":"us-south-1"}]`), nil
 		case "versions":
 			return []byte(`[{"version":"1.31.9"}]`), nil
@@ -56,7 +62,7 @@ func (f *fakeTerraform) Run(_ context.Context, environ []string, _ string, args 
 const testConfig = `version: 1
 targets:
   example:
-    providers: [vpc-gen2]
+    providers: [vpc-gen2, classic]
     default_region: us-south
     endpoints:
       iam: https://iam.example.invalid
@@ -74,6 +80,18 @@ func configuredInputs(t *testing.T) Inputs {
 		t.Fatal(err)
 	}
 	return Inputs{ConfigPath: path, Target: "example", Provider: "vpc-gen2", Platform: "kubernetes", Version: "1.31.9", ResourceGroup: "fixture-group", Zone: "us-south-1", Flavor: "bx2.2x8", Name: "fixture-cluster"}
+}
+
+func configuredClassicInputs(t *testing.T) Inputs {
+	inputs := configuredInputs(t)
+	inputs.Provider = "classic"
+	inputs.Platform = "openshift"
+	inputs.Zone, inputs.Flavor = "", ""
+	inputs.Datacenter = "dal10"
+	inputs.MachineType = "bx2.2x8"
+	inputs.PublicVLANID = "12345"
+	inputs.PrivateVLANID = "67890"
+	return inputs
 }
 
 func newRunner(workspace string, fake *fakeTerraform) Runner {
@@ -144,6 +162,223 @@ func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 	}
 }
 
+func TestClassicLifecyclePersistsAndOmitsVPCValues(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "state", "ict", "terraform")
+	fake := &fakeTerraform{}
+	discovery := &fakeIBMCloud{}
+	runner := newRunner(workspace, fake)
+	runner.IBMCloud = discovery
+	runner.Environ = []string{
+		"IAAS_CLASSIC_USERNAME=synthetic-user",
+		"IAAS_CLASSIC_API_KEY=synthetic-api-key",
+		"IBMCLOUD_CS_API_ENDPOINT=https://override-containers.example.invalid",
+	}
+	inputs := configuredClassicInputs(t)
+	if err := runner.Plan(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.environs) != 0 {
+		t.Fatalf("fully specified Classic inputs triggered discovery: %d calls", len(discovery.environs))
+	}
+	tfvars, err := os.ReadFile(filepath.Join(workspace, ictterraform.TFVarsName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, absent := range []string{"\"zone\"", "\"flavor\""} {
+		if strings.Contains(string(tfvars), absent) {
+			t.Fatalf("Classic tfvars contains VPC-only field %s", absent)
+		}
+	}
+	for _, present := range []string{"\"datacenter\":\"dal10\"", "\"machine_type\":\"bx2.2x8\"", "\"public_vlan_id\":\"12345\"", "\"private_vlan_id\":\"67890\"", "\"worker_count\":3"} {
+		if !strings.Contains(string(tfvars), present) {
+			t.Fatalf("Classic tfvars missing %s", present)
+		}
+	}
+	fake.resources = true
+	fake.calls = nil
+	if err := runner.Create(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fake.calls[len(fake.calls)-1], " "); !strings.Contains(got, "apply -input=false -auto-approve") {
+		t.Fatalf("Classic create did not apply: %q", got)
+	}
+	changed := inputs
+	changed.Datacenter = "wdc04"
+	fake.calls = nil
+	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
+		t.Fatalf("mismatched Classic create error = %v", err)
+	}
+	if len(fake.calls) != 1 || !strings.HasSuffix(strings.Join(fake.calls[0], " "), "state list") {
+		t.Fatalf("mismatched Classic create calls = %#v", fake.calls)
+	}
+	fake.calls = nil
+	if err := runner.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fake.calls[len(fake.calls)-1], " "); !strings.Contains(got, "destroy -input=false -auto-approve") {
+		t.Fatalf("Classic destroy did not run: %q", got)
+	}
+}
+
+func TestClassicValidationAndCredentialPreflight(t *testing.T) {
+	tests := map[string]struct {
+		mutate  func(*Inputs)
+		environ []string
+		want    string
+	}{
+		"missing VLAN": {
+			mutate: func(in *Inputs) { in.PublicVLANID = "" },
+			want:   "missing required input(s): public-vlan-id",
+		},
+		"non-numeric VLAN": {
+			mutate: func(in *Inputs) { in.PrivateVLANID = "not-numeric" },
+			want:   "private VLAN ID must be a numeric",
+		},
+		"missing credentials": {
+			environ: []string{"IAAS_CLASSIC_USERNAME=synthetic-user"},
+			want:    "IAAS_CLASSIC_API_KEY",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeTerraform{}
+			runner := newRunner(t.TempDir(), fake)
+			runner.Environ = test.environ
+			inputs := configuredClassicInputs(t)
+			if test.mutate != nil {
+				test.mutate(&inputs)
+			}
+			err := runner.Plan(context.Background(), inputs)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Classic preflight error = %v, want %q", err, test.want)
+			}
+			if strings.Contains(err.Error(), "synthetic-user") {
+				t.Fatalf("credential value appeared in error: %q", err)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("Classic preflight called Terraform: %#v", fake.calls)
+			}
+		})
+	}
+}
+
+func TestClassicDiscoveryAndMissingInputBehavior(t *testing.T) {
+	bin := t.TempDir()
+	fzf := filepath.Join(bin, "fzf")
+	if err := os.WriteFile(fzf, []byte("#!/bin/sh\nIFS= read -r value\nprintf '%s\\n' \"$value\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	fake := &fakeTerraform{}
+	discovery := &fakeIBMCloud{}
+	runner := newRunner(t.TempDir(), fake)
+	runner.Terminal = func() bool { return true }
+	runner.IBMCloud = discovery
+	runner.Environ = []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}
+	inputs := configuredClassicInputs(t)
+	inputs.Datacenter, inputs.MachineType = "", ""
+	if err := runner.Plan(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.environs) == 0 {
+		t.Fatal("omitted Classic discovery inputs did not invoke ibmcloud")
+	}
+
+	fake.calls = nil
+	discovery.environs = nil
+	runner.Terminal = func() bool { return false }
+	inputs.Datacenter = ""
+	err := runner.Plan(context.Background(), inputs)
+	var missing *prompt.MissingInputError
+	if err == nil || !errors.As(err, &missing) || !strings.Contains(err.Error(), "datacenter") {
+		t.Fatalf("non-interactive Classic missing input error = %v", err)
+	}
+	if len(discovery.environs) != 0 || len(fake.calls) != 0 {
+		t.Fatalf("non-interactive Classic missing input invoked discovery or Terraform: discovery=%d terraform=%d", len(discovery.environs), len(fake.calls))
+	}
+}
+
+func TestClassicTerraformUsesExistingVLANInputs(t *testing.T) {
+	asset, err := os.ReadFile(filepath.Join("..", "terraform", "assets", "main.tf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(asset)
+	if !strings.Contains(contents, "resource \"ibm_container_cluster\" \"cluster\"") {
+		t.Fatal("Terraform asset does not define the Classic cluster resource")
+	}
+	if strings.Contains(contents, "resource \"ibm_network_vlan\"") {
+		t.Fatal("Terraform asset manages a Classic VLAN")
+	}
+	for _, input := range []string{"public_vlan_id", "private_vlan_id"} {
+		if !strings.Contains(contents, "var."+input) {
+			t.Fatalf("Terraform asset does not pass existing %s", input)
+		}
+	}
+}
+
+func TestClassicTargetIsRejectedBeforeDiscovery(t *testing.T) {
+	fake := &fakeTerraform{}
+	discovery := &fakeIBMCloud{}
+	runner := newRunner(t.TempDir(), fake)
+	runner.Terminal = func() bool { return true }
+	runner.IBMCloud = discovery
+	inputs := configuredClassicInputs(t)
+	content, err := os.ReadFile(inputs.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inputs.ConfigPath, []byte(strings.Replace(string(content), "[vpc-gen2, classic]", "[vpc-gen2]", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = runner.Plan(context.Background(), inputs)
+	if err == nil || !strings.Contains(err.Error(), "does not support provider") {
+		t.Fatalf("unsupported Classic target error = %v", err)
+	}
+	if len(discovery.environs) != 0 || len(fake.calls) != 0 {
+		t.Fatalf("unsupported Classic target invoked discovery or Terraform: discovery=%d terraform=%d", len(discovery.environs), len(fake.calls))
+	}
+}
+
+func TestClassicWorkerDefaultsAndExplicitOverride(t *testing.T) {
+	for name, test := range map[string]struct {
+		platform string
+		workers  int
+		want     int
+	}{
+		"Kubernetes default":         {platform: "kubernetes", want: 1},
+		"OpenShift default":          {platform: "openshift", want: 3},
+		"explicit positive override": {platform: "openshift", workers: 2, want: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs := configuredClassicInputs(t)
+			inputs.Platform = test.platform
+			inputs.WorkerCount = test.workers
+			cfg, err := config.Load(inputs.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values, _, err := newRunner(t.TempDir(), &fakeTerraform{}).resolve(context.Background(), cfg, inputs)
+			if err != nil || values.WorkerCount != test.want {
+				t.Fatalf("Classic workers = %d, %v, want %d", values.WorkerCount, err, test.want)
+			}
+		})
+	}
+}
+
+func TestClassicRejectsNonpositiveWorkerOverride(t *testing.T) {
+	inputs := configuredClassicInputs(t)
+	inputs.WorkerCount = -1
+	cfg, err := config.Load(inputs.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = newRunner(t.TempDir(), &fakeTerraform{}).resolve(context.Background(), cfg, inputs)
+	if err == nil || !strings.Contains(err.Error(), "worker count must be at least one") {
+		t.Fatalf("Classic nonpositive worker count error = %v", err)
+	}
+}
+
 func TestDestroyRefusesEmptyState(t *testing.T) {
 	workspace := t.TempDir()
 	fake := &fakeTerraform{}
@@ -191,7 +426,7 @@ func TestTerminalDiscoveryUsesFzfOnlyForMissingInputs(t *testing.T) {
 	runner.IBMCloud = &fakeIBMCloud{}
 	runner.Environ = []string{"USER=fixture-user"}
 	inputs := configuredInputs(t)
-	inputs.Target, inputs.Provider, inputs.Platform, inputs.Version, inputs.ResourceGroup, inputs.Zone, inputs.Flavor = "", "", "", "", "", "", ""
+	inputs.Platform, inputs.Version, inputs.ResourceGroup, inputs.Zone, inputs.Flavor = "", "", "", "", ""
 	if err := runner.Plan(context.Background(), inputs); err != nil {
 		t.Fatal(err)
 	}
