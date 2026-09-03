@@ -265,13 +265,29 @@ func (c Config) Target(name string) (Target, error) {
 	return target, nil
 }
 
-// ResolveTarget applies endpoint variables from environ to one target without changing os.Environ.
+// ResolveTarget applies endpoint variables using the profile default region.
 func (c Config) ResolveTarget(name string, environ []string) (ResolvedTarget, error) {
 	target, err := c.Target(name)
 	if err != nil {
 		return ResolvedTarget{}, err
 	}
-	target.Endpoints.VPC = strings.ReplaceAll(target.Endpoints.VPC, "{region}", target.DefaultRegion)
+	return c.resolveTarget(name, target, target.DefaultRegion, environ)
+}
+
+// ResolveTargetForRegion applies endpoint variables after a VPC zone selects its region.
+func (c Config) ResolveTargetForRegion(name, region string, environ []string) (ResolvedTarget, error) {
+	target, err := c.Target(name)
+	if err != nil {
+		return ResolvedTarget{}, err
+	}
+	if !regionPattern.MatchString(region) {
+		return ResolvedTarget{}, fmt.Errorf("invalid region %q", region)
+	}
+	return c.resolveTarget(name, target, region, environ)
+}
+
+func (c Config) resolveTarget(name string, target Target, region string, environ []string) (ResolvedTarget, error) {
+	target.Endpoints.VPC = strings.ReplaceAll(target.Endpoints.VPC, "{region}", region)
 	overrides := make(map[string]string, len(environ))
 	for _, entry := range environ {
 		key, value, found := strings.Cut(entry, "=")
@@ -300,7 +316,7 @@ func (c Config) ResolveTarget(name string, environ []string) (ResolvedTarget, er
 
 // Environment returns standard IBM Cloud endpoint variables for a resolved target.
 func (t ResolvedTarget) Environment() map[string]string {
-	return map[string]string{
+	endpoints := map[string]string{
 		"IBMCLOUD_IAM_API_ENDPOINT":                 t.Endpoints.IAM,
 		"IBMCLOUD_CS_API_ENDPOINT":                  t.Endpoints.ContainerService,
 		"IBMCLOUD_GT_API_ENDPOINT":                  t.Endpoints.GlobalTagging,
@@ -310,4 +326,10 @@ func (t ResolvedTarget) Environment() map[string]string {
 		"IBMCLOUD_SATELLITE_API_ENDPOINT":           t.Endpoints.Satellite,
 		"IBMCLOUD_SATELLITE_CONFIG_API_ENDPOINT":    t.Endpoints.SatelliteConfig,
 	}
+	for key, value := range endpoints {
+		if value == "" {
+			delete(endpoints, key)
+		}
+	}
+	return endpoints
 }

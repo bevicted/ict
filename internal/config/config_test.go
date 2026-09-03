@@ -155,6 +155,13 @@ func TestResolveTargetUsesOverridesWithoutMutatingEnvironment(t *testing.T) {
 	if got := os.Getenv("IBMCLOUD_IAM_API_ENDPOINT"); got != "https://parent.example.invalid" {
 		t.Fatalf("parent environment changed to %q", got)
 	}
+	regional, err := cfg.ResolveTargetForRegion("alpha", "eu-gb", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := regional.Endpoints.VPC; got != "https://vpc.eu-gb.example.invalid" {
+		t.Fatalf("regional VPC endpoint = %q", got)
+	}
 }
 
 func TestResolveTargetRejectsInvalidOverridesAndSortsTargets(t *testing.T) {
