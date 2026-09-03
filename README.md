@@ -75,6 +75,24 @@ These commands use the same configuration discovery order as lifecycle commands:
 
 The output is effective, not necessarily stored: ICT expands each target's VPC endpoint with that target's `default_region` and applies recognized endpoint environment overrides. Only the version 1 configuration fields are displayed; credential environment variables and password-manager data are not read or displayed.
 
+### Update stored configuration
+
+Use `config set` to change one stored value by dot path:
+
+```sh
+ict config set targets.example.default_region eu-gb [--config PATH]
+ict config set targets.example.providers - [--config PATH] <<'YAML'
+- vpc-gen2
+- classic
+YAML
+```
+
+The value is one YAML value. Inline scalars and collections retain YAML typing, so quote a value when it must be a string rather than a YAML boolean, number, or null. A value exactly equal to `-` reads that YAML value from standard input.
+
+`set` accepts the update only when the resulting complete document strictly decodes and passes all ICT configuration validation. It can add an omitted field or a complete target, and can repair an incomplete stored document when that one update makes it valid. Malformed source YAML, invalid values or paths, and invalid resulting configurations leave the source unchanged.
+
+`set` updates the stored document, whereas `show` and `get` display the effective configuration. The update preserves comments, mapping order, scalar styles, and unrelated formatting outside the replaced subtree; formatting within the replaced subtree can change.
+
 ## Lifecycle
 
 Use `plan` to review Terraform changes, `create` to apply them, and `destroy` only to destroy the saved active cluster. `create` and `destroy` use Terraform auto-approval, so review a plan first.

@@ -194,6 +194,219 @@ func TestRunnerReportsOutputErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerSetParsesInlineAndStdinValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		path  string
+		value string
+		stdin string
+		check func(t *testing.T, cfg *Config)
+	}{
+		{
+			name:  "inline scalar",
+			path:  "targets.alpha.default_region",
+			value: "eu-gb",
+			check: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if cfg.Targets["alpha"].DefaultRegion != "eu-gb" {
+					t.Fatalf("default region = %q", cfg.Targets["alpha"].DefaultRegion)
+				}
+			},
+		},
+		{
+			name:  "inline list",
+			path:  "targets.alpha.providers",
+			value: "[classic]",
+			check: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				providers := cfg.Targets["alpha"].Providers
+				if len(providers) != 1 || providers[0] != ProviderClassic {
+					t.Fatalf("providers = %#v", providers)
+				}
+			},
+		},
+		{
+			name:  "stdin object",
+			path:  "targets.alpha.endpoints",
+			value: "-",
+			stdin: `iam: https://replacement.example.invalid
+container_service: https://containers.example.invalid
+global_tagging: https://global-tagging.example.invalid
+resource_management: https://resource-management.example.invalid
+resource_controller: https://resource-controller.example.invalid
+vpc: https://vpc.{region}.example.invalid
+satellite: https://satellite.example.invalid
+satellite_config: https://satellite-config.example.invalid`,
+			check: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				if cfg.Targets["alpha"].Endpoints.IAM != "https://replacement.example.invalid" {
+					t.Fatalf("IAM endpoint = %q", cfg.Targets["alpha"].Endpoints.IAM)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeConfig(t, validConfig)
+			runner := Runner{Stdin: strings.NewReader(test.stdin)}
+			if err := runner.Set(path, test.path, test.value); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.check(t, cfg)
+		})
+	}
+}
+
+func TestRunnerSetInsertsAndPreservesUnrelatedSyntax(t *testing.T) {
+	contents := strings.Replace(validConfig, "version: 1", "# top-level comment\nversion: 1", 1)
+	contents = strings.Replace(contents, "    default_region: us-south", "    default_region: 'us-south' # retained style", 1)
+	contents = strings.Replace(contents, "      iam: https://iam.example.invalid", "      # IAM mapping comment\n      iam: https://iam.example.invalid # retained value comment", 1)
+	contents = strings.Replace(contents, "      satellite_config: https://satellite-config.example.invalid\n", "", 1)
+	path := writeConfig(t, contents)
+
+	if err := (Runner{}).Set(path, "targets.alpha.endpoints.satellite_config", "https://restored.example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Runner{}).Set(path, "targets.alpha.endpoints.iam", "https://updated.example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	newTarget := `providers: [classic]
+default_region: eu-gb
+endpoints:
+  iam: https://iam.example.invalid
+  container_service: https://containers.example.invalid
+  global_tagging: https://global-tagging.example.invalid
+  resource_management: https://resource-management.example.invalid
+  resource_controller: https://resource-controller.example.invalid`
+	if err := (Runner{}).Set(path, "targets.gamma", newTarget); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(stored)
+	for _, want := range []string{
+		"# top-level comment\n",
+		"default_region: 'us-south' # retained style",
+		"# IAM mapping comment\n",
+		"iam: https://updated.example.invalid # retained value comment",
+		"satellite_config: https://restored.example.invalid",
+		"  gamma:\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("stored config does not preserve %q:\n%s", want, text)
+		}
+	}
+	if strings.Index(text, "providers:") > strings.Index(text, "default_region:") || strings.Index(text, "default_region:") > strings.Index(text, "endpoints:") {
+		t.Errorf("unrelated mapping order changed:\n%s", text)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunnerSetRejectsInvalidCandidatesWithoutChangingSource(t *testing.T) {
+	completeTarget := `providers: [classic]
+default_region: eu-gb
+endpoints:
+  iam: https://iam.example.invalid
+  container_service: https://containers.example.invalid
+  global_tagging: https://global-tagging.example.invalid
+  resource_management: https://resource-management.example.invalid
+  resource_controller: https://resource-controller.example.invalid`
+	tests := []struct {
+		name    string
+		content string
+		path    string
+		value   string
+		stdin   string
+		want    string
+	}{
+		{"empty path", validConfig, "", "value", "", "invalid config path"},
+		{"malformed path", validConfig, "targets..alpha", "value", "", "invalid config path"},
+		{"impossible traversal", validConfig, "version.value", "value", "", "cannot traverse scalar"},
+		{"unknown field", validConfig, "targets.alpha.unknown", "value", "", "decode config"},
+		{"duplicate field", strings.Replace(validConfig, "version: 1", "version: 1\nversion: 1", 1), "targets.alpha.default_region", "eu-gb", "", "parse config"},
+		{"extra document", validConfig + "---\nversion: 1\ntargets: {}\n", "targets.alpha.default_region", "eu-gb", "", "parse config"},
+		{"incompatible type", validConfig, "version", "nope", "", "decode config"},
+		{"unsupported version", validConfig, "version", "2", "", "unsupported config version"},
+		{"unsupported provider", validConfig, "targets.alpha.providers", "[other]", "", "unsupported provider"},
+		{"invalid target", validConfig, "targets.Alpha", completeTarget, "", "invalid target"},
+		{"invalid region", validConfig, "targets.alpha.default_region", "not_a_region", "", "invalid default_region"},
+		{"invalid URL", validConfig, "targets.alpha.endpoints.iam", "not-a-url", "", "invalid iam endpoint"},
+		{"incomplete endpoint", validConfig, "targets.alpha.endpoints.iam", "''", "", "iam is required"},
+		{"malformed stdin", validConfig, "targets.alpha.endpoints.iam", "-", "[", "parse config set value"},
+		{"empty stdin", validConfig, "targets.alpha.endpoints.iam", "-", "", "value is empty"},
+		{"malformed source", "targets: [", "targets.alpha.endpoints.iam", "https://replacement.example.invalid", "", "parse config"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeConfig(t, test.content)
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = (Runner{Stdin: strings.NewReader(test.stdin)}).Set(path, test.path, test.value)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Set() error = %v, want containing %q", err, test.want)
+			}
+			stored, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(stored, original) {
+				t.Errorf("Set() changed invalid source:\nwant %q\n got %q", original, stored)
+			}
+			temporary, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".ict-config-*"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(temporary) != 0 {
+				t.Errorf("Set() left temporary files: %v", temporary)
+			}
+		})
+	}
+}
+
+func TestRunnerSetReportsMissingSourceAndUsesPrivateMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+	if err := (Runner{}).Set(path, "version", "1"); err == nil || !strings.Contains(err.Error(), "read config") {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("missing config was created: %v", err)
+	}
+
+	discovered := writeConfig(t, validConfig)
+	if err := (Runner{Environ: []string{"ICT_CONFIG=" + discovered}}).Set("", "targets.alpha.default_region", "eu-gb"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(discovered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Targets["alpha"].DefaultRegion != "eu-gb" {
+		t.Fatalf("discovered default region = %q", cfg.Targets["alpha"].DefaultRegion)
+	}
+
+	path = writeConfig(t, validConfig)
+	if err := (Runner{}).Set(path, "targets.alpha.default_region", "eu-gb"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("config mode = %o, want 600", got)
+	}
+}
+
 type errWriter struct{ err error }
 
 func (w errWriter) Write([]byte) (int, error) { return 0, w.err }

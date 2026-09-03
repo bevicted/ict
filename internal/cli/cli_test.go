@@ -114,6 +114,27 @@ targets:
 		t.Fatalf("config get output = %q", got)
 	}
 
+	parsed, command, err = Parse([]string{"config", "set", "targets.example.default_region", "eu-gb", "--config", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Command(); got != "config set <path> <yaml-value>" {
+		t.Fatalf("parsed command = %q", got)
+	}
+	if command.Config.Set.Config != path || command.Config.Set.Path != "targets.example.default_region" || command.Config.Set.Value != "eu-gb" {
+		t.Fatalf("config set = %#v", command.Config.Set)
+	}
+	if err := (Runner{Config: config.Runner{}}).Run(context.Background(), parsed, command); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Targets["example"].DefaultRegion != "eu-gb" {
+		t.Fatalf("set default region = %q", updated.Targets["example"].DefaultRegion)
+	}
+
 	t.Setenv("ICT_CONFIG", path)
 	parsed, command, err = Parse([]string{"config", "show"})
 	if err != nil {

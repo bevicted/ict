@@ -64,7 +64,11 @@ type ResolvedTarget struct {
 
 // DiscoverPath resolves the required config file in precedence order.
 func DiscoverPath(explicit string) (string, error) {
-	return DiscoverPathFromEnvironment(explicit, os.Environ())
+	path, err := DiscoverPathFromEnvironment(explicit, os.Environ())
+	if err != nil {
+		return "", fmt.Errorf("discover config path: %w", err)
+	}
+	return path, nil
 }
 
 // DiscoverPathFromEnvironment resolves the required config file using environ.
@@ -121,22 +125,31 @@ func Load(path string) (*Config, error) {
 	}
 	defer file.Close()
 
-	decoder := yaml.NewDecoder(file, yaml.DisallowUnknownField())
+	cfg, err := Decode(file)
+	if err != nil {
+		return nil, fmt.Errorf("load config %q: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// Decode strictly decodes and validates one complete configuration document.
+func Decode(reader io.Reader) (*Config, error) {
+	decoder := yaml.NewDecoder(reader, yaml.DisallowUnknownField())
 	var cfg Config
 	if err := decoder.Decode(&cfg); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("config %q is empty", path)
+			return nil, errors.New("config is empty")
 		}
-		return nil, fmt.Errorf("decode config %q: %w", path, err)
+		return nil, fmt.Errorf("decode config: %w", err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err == nil {
-		return nil, fmt.Errorf("config %q contains multiple YAML documents", path)
+		return nil, errors.New("config contains multiple YAML documents")
 	} else if !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("decode config %q: %w", path, err)
+		return nil, fmt.Errorf("decode config: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("validate config %q: %w", path, err)
+		return nil, fmt.Errorf("validate config: %w", err)
 	}
 	return &cfg, nil
 }

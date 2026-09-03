@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/bevicted/ict/internal/prompt"
 	"github.com/goccy/go-yaml"
+	"github.com/goccy/go-yaml/ast"
+	"github.com/goccy/go-yaml/parser"
 )
 
 // ProcessRunner is the subprocess seam used by config commands that need an editor.
@@ -70,6 +74,200 @@ func (r Runner) Get(configPath, path string) error {
 	return nil
 }
 
+// Set updates a stored configuration value only when the complete result validates.
+func (r Runner) Set(configPath, path, value string) error {
+	configPath, err := DiscoverPathFromEnvironment(configPath, r.environment())
+	if err != nil {
+		return fmt.Errorf("discover config: %w", err)
+	}
+	source, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read config %q: %w", configPath, err)
+	}
+
+	valueSource := []byte(value)
+	if value == "-" {
+		valueSource, err = io.ReadAll(r.stdin())
+		if err != nil {
+			return fmt.Errorf("read config set value from stdin: %w", err)
+		}
+	}
+	valueNode, err := parseSetValue(valueSource)
+	if err != nil {
+		return err
+	}
+	parts, err := configPathParts(path)
+	if err != nil {
+		return err
+	}
+	file, err := parseSetSource(source)
+	if err != nil {
+		return fmt.Errorf("parse config %q: %w", configPath, err)
+	}
+	if err := replaceOrInsert(file, parts, valueNode); err != nil {
+		return fmt.Errorf("set config path %q: %w", path, err)
+	}
+
+	candidate := []byte(file.String())
+	if _, err := Decode(strings.NewReader(string(candidate))); err != nil {
+		return fmt.Errorf("validate config set candidate: %w", err)
+	}
+	if err := persistConfig(configPath, candidate); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseSetSource(source []byte) (*ast.File, error) {
+	file, err := parser.ParseBytes(source, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+	if len(file.Docs) != 1 || file.Docs[0].Body == nil {
+		return nil, fmt.Errorf("source must contain exactly one YAML document")
+	}
+	return file, nil
+}
+
+func parseSetValue(source []byte) (ast.Node, error) {
+	if len(strings.TrimSpace(string(source))) == 0 {
+		return nil, fmt.Errorf("config set value is empty")
+	}
+	file, err := parser.ParseBytes(source, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("parse config set value: %w", err)
+	}
+	if len(file.Docs) != 1 || file.Docs[0].Body == nil {
+		return nil, fmt.Errorf("config set value must contain exactly one YAML document")
+	}
+	return file.Docs[0].Body, nil
+}
+
+func configPathParts(path string) ([]string, error) {
+	if path == "" {
+		return nil, fmt.Errorf("invalid config path %q", path)
+	}
+	parts := strings.Split(path, ".")
+	if slices.Contains(parts, "") {
+		return nil, fmt.Errorf("invalid config path %q", path)
+	}
+	return parts, nil
+}
+
+func replaceOrInsert(file *ast.File, parts []string, value ast.Node) error {
+	current := file.Docs[0].Body
+	path := (&yaml.PathBuilder{}).Root()
+	for index, part := range parts {
+		switch node := current.(type) {
+		case *ast.MappingNode:
+			entry := mappingValue(node, part)
+			if entry == nil {
+				addition, err := nestedMapping(parts[index:], value)
+				if err != nil {
+					return err
+				}
+				if err := path.Build().MergeFromNode(file, addition.Docs[0]); err != nil {
+					return fmt.Errorf("insert missing value: %w", err)
+				}
+				return nil
+			}
+			current = entry.Value
+			path = path.Child(part)
+		case *ast.SequenceNode:
+			sequenceIndex, err := strconv.ParseUint(part, 10, 0)
+			if err != nil || sequenceIndex >= uint64(len(node.Values)) {
+				return fmt.Errorf("cannot traverse index %q", part)
+			}
+			current = node.Values[sequenceIndex]
+			path = path.Index(uint(sequenceIndex))
+		default:
+			return fmt.Errorf("cannot traverse scalar %q", part)
+		}
+	}
+	if value.GetComment() == nil && current.GetComment() != nil {
+		if err := value.SetComment(current.GetComment()); err != nil {
+			return fmt.Errorf("preserve value comment: %w", err)
+		}
+	}
+	if err := path.Build().ReplaceWithNode(file, value); err != nil {
+		return fmt.Errorf("replace value: %w", err)
+	}
+	return nil
+}
+
+func mappingValue(node *ast.MappingNode, wanted string) *ast.MappingValueNode {
+	for _, entry := range node.Values {
+		key := entry.Key.GetToken().Value
+		if decoded, err := strconv.Unquote(key); err == nil {
+			key = decoded
+		} else if len(key) >= 2 && key[0] == '\'' && key[len(key)-1] == '\'' {
+			key = key[1 : len(key)-1]
+		}
+		if key == wanted {
+			return entry
+		}
+	}
+	return nil
+}
+
+func nestedMapping(parts []string, value ast.Node) (*ast.File, error) {
+	source := value.String()
+	for index := len(parts) - 1; index >= 0; index-- {
+		key, err := yaml.Marshal(parts[index])
+		if err != nil {
+			return nil, fmt.Errorf("encode config path key: %w", err)
+		}
+		keyText := strings.TrimSpace(string(key))
+		if _, scalar := value.(ast.ScalarNode); scalar || strings.HasPrefix(source, "[") || strings.HasPrefix(source, "{") {
+			source = keyText + ": " + source
+		} else {
+			source = keyText + ":\n" + indentYAML(source)
+		}
+		value = nil
+	}
+	file, err := parser.ParseBytes([]byte(source), parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("construct missing config path: %w", err)
+	}
+	return file, nil
+}
+
+func indentYAML(source string) string {
+	return "  " + strings.ReplaceAll(source, "\n", "\n  ")
+}
+
+func persistConfig(path string, contents []byte) (err error) {
+	file, err := os.CreateTemp(filepath.Dir(path), ".ict-config-*")
+	if err != nil {
+		return fmt.Errorf("create temporary config file: %w", err)
+	}
+	temporaryPath := file.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err = file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("set temporary config file permissions: %w", err)
+	}
+	if _, err = file.Write(contents); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write temporary config file: %w", err)
+	}
+	if err = file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync temporary config file: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("close temporary config file: %w", err)
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace config %q: %w", path, err)
+	}
+	return nil
+}
+
 func (r Runner) effective(configPath string) (*Config, error) {
 	path, err := DiscoverPathFromEnvironment(configPath, r.environment())
 	if err != nil {
@@ -97,6 +295,13 @@ func (r Runner) environment() []string {
 	return os.Environ()
 }
 
+func (r Runner) stdin() io.Reader {
+	if r.Stdin != nil {
+		return r.Stdin
+	}
+	return os.Stdin
+}
+
 func (r Runner) stdout() io.Writer {
 	if r.Stdout != nil {
 		return r.Stdout
@@ -109,10 +314,8 @@ func valueAt(cfg *Config, path string) (any, error) {
 		return nil, fmt.Errorf("invalid config path %q", path)
 	}
 	parts := strings.Split(path, ".")
-	for _, part := range parts {
-		if part == "" {
-			return nil, fmt.Errorf("invalid config path %q", path)
-		}
+	if slices.Contains(parts, "") {
+		return nil, fmt.Errorf("invalid config path %q", path)
 	}
 
 	value := reflect.ValueOf(cfg)
@@ -141,7 +344,10 @@ func valueAt(cfg *Config, path string) (any, error) {
 			value = entry
 		case reflect.Slice, reflect.Array:
 			index, err := strconv.Atoi(part)
-			if err != nil || index < 0 || index >= value.Len() {
+			if err != nil {
+				return nil, fmt.Errorf("config path %q does not contain index %q: %w", path, part, err)
+			}
+			if index < 0 || index >= value.Len() {
 				return nil, fmt.Errorf("config path %q does not contain index %q", path, part)
 			}
 			value = value.Index(index)
@@ -155,7 +361,7 @@ func valueAt(cfg *Config, path string) (any, error) {
 func yamlField(value reflect.Value, name string) (reflect.Value, bool) {
 	for index := 0; index < value.NumField(); index++ {
 		field := value.Type().Field(index)
-		yamlName := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		yamlName, _, _ := strings.Cut(field.Tag.Get("yaml"), ",")
 		if yamlName == "" {
 			yamlName = field.Name
 		}

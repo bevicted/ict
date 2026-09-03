@@ -35,6 +35,7 @@ func TestPrintParseUsageForMissingCommand(t *testing.T) {
 		"destroy",
 		"config show [flags]",
 		"config get <path> [flags]",
+		"config set <path> <yaml-value> [flags]",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("usage does not contain %q:\n%s", want, output.String())
