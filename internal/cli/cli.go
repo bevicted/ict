@@ -17,7 +17,7 @@ type CLI struct {
 
 // VPCCommand contains the transient inputs shared by plan and create.
 type VPCCommand struct {
-	Config                         string   `help:"Target configuration file." type:"path" env:"ICT_CONFIG"`
+	Config                         string   `help:"Target configuration file." env:"ICT_CONFIG"`
 	Target                         string   `help:"Configured target name." env:"ICT_TARGET"`
 	Provider                       string   `help:"Cluster provider (vpc-gen2, classic, or satellite)." env:"ICT_PROVIDER"`
 	Platform                       string   `help:"Cluster platform (kubernetes or openshift)." env:"ICT_PLATFORM"`

@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bevicted/ict/internal/config"
 )
 
 func TestKongParsesICTEnvironment(t *testing.T) {
@@ -13,12 +16,36 @@ func TestKongParsesICTEnvironment(t *testing.T) {
 	t.Setenv("ICT_RESOURCE_GROUP", "fixture-group")
 	t.Setenv("ICT_ZONE", "us-south-1")
 	t.Setenv("ICT_FLAVOR", "bx2.2x8")
+	t.Setenv("ICT_CONFIG", "environment-config.yaml")
 	parsed, command, err := Parse([]string{"plan", "--config", "config.yaml", "--name", "fixture-cluster"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "plan" || command.Plan.Target != "example" || command.Plan.Provider != "vpc-gen2" || command.Plan.Zone != "us-south-1" {
+	if parsed.Command() != "plan" || command.Plan.Config != "config.yaml" || command.Plan.Target != "example" || command.Plan.Provider != "vpc-gen2" || command.Plan.Zone != "us-south-1" {
 		t.Fatalf("parsed command = %q, plan = %#v", parsed.Command(), command.Plan)
+	}
+}
+
+func TestKongUsesXDGConfigWhenConfigValueIsEmpty(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("ICT_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	for _, provider := range []string{"vpc-gen2", "classic", "satellite"} {
+		t.Run(provider, func(t *testing.T) {
+			_, command, err := Parse([]string{"plan", "--config=", "--provider", provider})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := config.DiscoverPath(command.Plan.Config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := filepath.Join(configHome, "ict", "config.yaml")
+			if path != want {
+				t.Fatalf("config path = %q, want %q", path, want)
+			}
+		})
 	}
 }
 
