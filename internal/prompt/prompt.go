@@ -28,22 +28,43 @@ func CanPrompt() bool {
 
 // Select chooses one value with the optional fzf executable.
 func Select(ctx context.Context, label string, choices []string) (string, error) {
-	if len(choices) == 0 {
-		return "", errors.New("no values available for " + label)
-	}
-	command, err := exec.LookPath("fzf")
+	values, err := selectValues(ctx, label, choices, false)
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, command, "--prompt="+label+"> ", "--height=12", "--reverse")
+	return values[0], nil
+}
+
+// SelectMany chooses one or more values using fzf's multi-select mode.
+func SelectMany(ctx context.Context, label string, choices []string) ([]string, error) {
+	values, err := selectValues(ctx, label, choices, true)
+	if err != nil {
+		return nil, fmt.Errorf("select %s: %w", label, err)
+	}
+	return values, nil
+}
+
+func selectValues(ctx context.Context, label string, choices []string, multiple bool) ([]string, error) {
+	if len(choices) == 0 {
+		return nil, errors.New("no values available for " + label)
+	}
+	command, err := exec.LookPath("fzf")
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"--prompt=" + label + "> ", "--height=12", "--reverse"}
+	if multiple {
+		args = append(args, "--multi")
+	}
+	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Stdin = strings.NewReader(strings.Join(choices, "\n") + "\n")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("select %s: %w", label, err)
+		return nil, fmt.Errorf("select %s: %w", label, err)
 	}
-	value := strings.TrimSpace(string(output))
-	if value == "" {
-		return "", errors.New("no value selected for " + label)
+	values := strings.Fields(string(output))
+	if len(values) == 0 {
+		return nil, errors.New("no value selected for " + label)
 	}
-	return value, nil
+	return values, nil
 }

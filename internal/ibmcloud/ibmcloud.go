@@ -11,9 +11,12 @@ import (
 )
 
 var (
-	zonePattern       = regexp.MustCompile(`^[a-z]+(?:-[a-z]+)+-[0-9]+$`)
-	datacenterPattern = regexp.MustCompile(`^[a-z]+[0-9]+$`)
-	flavorPattern     = regexp.MustCompile(`^[a-z][a-z0-9.-]*[0-9]x[0-9]+$`)
+	zonePattern        = regexp.MustCompile(`^[a-z]+(?:-[a-z]+)+-[0-9]+$`)
+	datacenterPattern  = regexp.MustCompile(`^[a-z]+[0-9]+$`)
+	flavorPattern      = regexp.MustCompile(`^[a-z][a-z0-9.-]*[0-9]x[0-9]+$`)
+	hostProfilePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*[0-9]x[0-9]+$`)
+	rhelImagePattern   = regexp.MustCompile(`(?i)^.*rhel.*$`)
+	managementPattern  = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 )
 
 // Runner executes a command with a scoped environment.
@@ -63,6 +66,21 @@ func (d Discovery) ClassicDatacenters(ctx context.Context) ([]string, error) {
 // ClassicMachineTypes lists Classic worker machine types available in a data center.
 func (d Discovery) ClassicMachineTypes(ctx context.Context, datacenter string) ([]string, error) {
 	return d.values(ctx, flavorPattern.String(), "ks", "flavor", "ls", "--zone", datacenter, "--provider", "classic", "--output", "json", "-q")
+}
+
+// SatelliteManagedFrom lists the public management locations exposed by Satellite.
+func (d Discovery) SatelliteManagedFrom(ctx context.Context) ([]string, error) {
+	return d.values(ctx, managementPattern.String(), "ks", "locations", "--provider", "satellite", "--output", "json", "-q")
+}
+
+// SatelliteHostImages lists public RHEL images suitable for Satellite hosts.
+func (d Discovery) SatelliteHostImages(ctx context.Context) ([]string, error) {
+	return d.values(ctx, rhelImagePattern.String(), "is", "images", "--visibility", "public", "--output", "json")
+}
+
+// SatelliteHostProfiles lists VPC instance profiles suitable for Satellite hosts.
+func (d Discovery) SatelliteHostProfiles(ctx context.Context) ([]string, error) {
+	return d.values(ctx, hostProfilePattern.String(), "is", "instance-profiles", "--output", "json")
 }
 
 func (d Discovery) Versions(ctx context.Context, platform string) ([]string, error) {

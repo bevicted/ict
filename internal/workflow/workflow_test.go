@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -21,10 +23,12 @@ type fakeTerraform struct {
 }
 
 type fakeIBMCloud struct {
+	calls    [][]string
 	environs [][]string
 }
 
 func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, append([]string(nil), args...))
 	f.environs = append(f.environs, append([]string(nil), environ...))
 	switch args[0] {
 	case "resource":
@@ -36,12 +40,22 @@ func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args .
 				if arg == "classic" {
 					return []byte(`[{"name":"dal10"}]`), nil
 				}
+				if arg == "satellite" {
+					return []byte(`[{"name":"us-south"}]`), nil
+				}
 			}
-			return []byte(`[{"name":"us-south-1"}]`), nil
+			return []byte(`[{"name":"us-south-1"},{"name":"us-south-2"},{"name":"us-south-3"}]`), nil
 		case "versions":
 			return []byte(`[{"version":"1.31.9"}]`), nil
 		case "flavor":
 			return []byte(`[{"name":"bx2.2x8"}]`), nil
+		}
+	case "is":
+		switch args[1] {
+		case "images":
+			return []byte(`[{"name":"rhel-8-synthetic"}]`), nil
+		case "instance-profiles":
+			return []byte(`[{"name":"bx2-4x16"}]`), nil
 		}
 	}
 	return nil, errors.New("unexpected discovery command")
@@ -80,6 +94,43 @@ func configuredInputs(t *testing.T) Inputs {
 		t.Fatal(err)
 	}
 	return Inputs{ConfigPath: path, Target: "example", Provider: "vpc-gen2", Platform: "kubernetes", Version: "1.31.9", ResourceGroup: "fixture-group", Zone: "us-south-1", Flavor: "bx2.2x8", Name: "fixture-cluster"}
+}
+
+func publicKeyLine() string {
+	keyType := "ssh-ed25519"
+	encoded := make([]byte, 4+len(keyType)+4+32)
+	binary.BigEndian.PutUint32(encoded[:4], uint32(len(keyType)))
+	copy(encoded[4:], keyType)
+	binary.BigEndian.PutUint32(encoded[4+len(keyType):], 32)
+	return keyType + " " + base64.StdEncoding.EncodeToString(encoded) + " synthetic-comment"
+}
+
+func configuredSatelliteInputs(t *testing.T) Inputs {
+	t.Helper()
+	inputs := configuredInputs(t)
+	content, err := os.ReadFile(inputs.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = []byte(strings.Replace(string(content), "[vpc-gen2, classic]", "[vpc-gen2, classic, satellite]", 1))
+	content = []byte(strings.Replace(string(content), "      vpc: https://vpc.{region}.example.invalid\n", "      vpc: https://vpc.{region}.example.invalid\n      satellite: https://satellite.example.invalid\n      satellite_config: https://satellite-config.example.invalid\n", 1))
+	if err := os.WriteFile(inputs.ConfigPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "satellite.pub")
+	if err := os.WriteFile(keyPath, []byte("\n"+publicKeyLine()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputs.Provider = "satellite"
+	inputs.Platform = "openshift"
+	inputs.Version = "4.17.3"
+	inputs.Zone, inputs.Flavor = "", ""
+	inputs.Name = "fixture-satellite"
+	inputs.SatelliteZones = []string{"us-south-1", "us-south-2", "us-south-3"}
+	inputs.SatelliteManagedFrom = "us-south"
+	inputs.SatelliteHostImage = "rhel-8-synthetic"
+	inputs.SatelliteSSHPublicKeyPath = keyPath
+	return inputs
 }
 
 func configuredClassicInputs(t *testing.T) Inputs {
@@ -125,7 +176,7 @@ func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{filepath.Join(workspace, "main.tf"), filepath.Join(workspace, "cluster-name.tftest.hcl"), filepath.Join(workspace, ictterraform.TFVarsName), filepath.Join(workspace, ictterraform.ContextName)} {
+	for _, path := range []string{filepath.Join(workspace, "main.tf"), filepath.Join(workspace, "cluster-name.tftest.hcl"), filepath.Join(workspace, "satellite-topology.tftest.hcl"), filepath.Join(workspace, ictterraform.TFVarsName), filepath.Join(workspace, ictterraform.ContextName)} {
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("private runtime file %s = %v, %v", path, info, err)

@@ -124,7 +124,7 @@ variable "satellite_zones" {
       length(var.satellite_zones) == 3 &&
       length(distinct(var.satellite_zones)) == 3 &&
       alltrue([for zone in var.satellite_zones : can(regex("^[a-z]+(-[a-z]+)+-[0-9]+$", zone))]) &&
-      length(distinct([for zone in var.satellite_zones : regexreplace(zone, "-[0-9]+$", "")])) == 1
+      length(distinct([for zone in var.satellite_zones : replace(zone, "/-[0-9]+$/", "")])) == 1
     )
     error_message = "satellite_zones must contain three distinct VPC zones in one region."
   }

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-//go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl assets/cluster-name.tftest.hcl
+//go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl assets/cluster-name.tftest.hcl assets/satellite-topology.tftest.hcl
 var assets embed.FS
 
 const (
@@ -42,10 +42,11 @@ func Materialize(workspace string) error {
 		return fmt.Errorf("protect Terraform runtime directory: %w", err)
 	}
 	for source, destination := range map[string]string{
-		"assets/main.tf":                 "main.tf",
-		"assets/variables.tf":            "variables.tf",
-		"assets/.terraform.lock.hcl":     ".terraform.lock.hcl",
-		"assets/cluster-name.tftest.hcl": "cluster-name.tftest.hcl",
+		"assets/main.tf":                       "main.tf",
+		"assets/variables.tf":                  "variables.tf",
+		"assets/.terraform.lock.hcl":           ".terraform.lock.hcl",
+		"assets/cluster-name.tftest.hcl":       "cluster-name.tftest.hcl",
+		"assets/satellite-topology.tftest.hcl": "satellite-topology.tftest.hcl",
 	} {
 		contents, err := fs.ReadFile(assets, source)
 		if err != nil {
@@ -59,7 +60,12 @@ func Materialize(workspace string) error {
 }
 
 // AtomicWrite replaces a private runtime file only after its complete content is written.
-func AtomicWrite(path string, contents []byte) error { return atomicWrite(path, contents) }
+func AtomicWrite(path string, contents []byte) error {
+	if err := atomicWrite(path, contents); err != nil {
+		return fmt.Errorf("write runtime file: %w", err)
+	}
+	return nil
+}
 
 func atomicWrite(path string, contents []byte) error {
 	directory := filepath.Dir(path)

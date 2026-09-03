@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestKongParsesICTEnvironment(t *testing.T) {
 	t.Setenv("ICT_TARGET", "example")
@@ -26,6 +29,16 @@ func TestKongParsesClassicInputs(t *testing.T) {
 	}
 	if parsed.Command() != "plan" || command.Plan.Provider != "classic" || command.Plan.Datacenter != "dal10" || command.Plan.PrivateVLANID != "67890" {
 		t.Fatalf("parsed classic command = %q, plan = %#v", parsed.Command(), command.Plan)
+	}
+}
+
+func TestKongParsesSatelliteInputs(t *testing.T) {
+	parsed, command, err := Parse([]string{"plan", "--config", "config.yaml", "--target", "example", "--provider", "satellite", "--platform", "openshift", "--version", "4.17.3", "--resource-group", "fixture-group", "--satellite-zone", "us-south-1", "--satellite-zone", "us-south-2", "--satellite-zone", "us-south-3", "--satellite-managed-from", "us-south", "--satellite-host-image", "rhel-8-synthetic", "--satellite-ssh-public-key", "key.pub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Command() != "plan" || command.Plan.Provider != "satellite" || len(command.Plan.SatelliteZones) != 3 || !strings.HasSuffix(command.Plan.SatelliteSSHPublicKeyPath, "key.pub") {
+		t.Fatalf("parsed Satellite command = %q, plan = %#v", parsed.Command(), command.Plan)
 	}
 }
 

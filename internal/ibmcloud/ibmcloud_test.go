@@ -42,6 +42,41 @@ func TestClassicDiscoveryUsesClassicCommands(t *testing.T) {
 	}
 }
 
+func TestSatelliteDiscoveryUsesJSONCommands(t *testing.T) {
+	fake := &fakeRunner{output: []byte(`[{"name":"us-south"},{"name":"not a location"}]`)}
+	values, err := (Discovery{Runner: fake}).SatelliteManagedFrom(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"us-south"}; !reflect.DeepEqual(values, want) {
+		t.Fatalf("management locations = %#v, want %#v", values, want)
+	}
+	if want := []string{"ks", "locations", "--provider", "satellite", "--output", "json", "-q"}; !reflect.DeepEqual(fake.args, want) {
+		t.Fatalf("management location args = %#v, want %#v", fake.args, want)
+	}
+
+	fake.output = []byte(`[{"name":"rhel-8-synthetic"},{"name":"other-image"}]`)
+	values, err = (Discovery{Runner: fake}).SatelliteHostImages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"rhel-8-synthetic"}; !reflect.DeepEqual(values, want) {
+		t.Fatalf("host images = %#v, want %#v", values, want)
+	}
+	if want := []string{"is", "images", "--visibility", "public", "--output", "json"}; !reflect.DeepEqual(fake.args, want) {
+		t.Fatalf("host image args = %#v, want %#v", fake.args, want)
+	}
+
+	fake.output = []byte(`[{"name":"bx2-4x16"},{"name":"unsupported"}]`)
+	values, err = (Discovery{Runner: fake}).SatelliteHostProfiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"bx2-4x16"}; !reflect.DeepEqual(values, want) {
+		t.Fatalf("host profiles = %#v, want %#v", values, want)
+	}
+}
+
 func TestDiscoveryDecodesAndNormalizesJSON(t *testing.T) {
 	fake := &fakeRunner{output: []byte(`[{"name":"us-south-2"},{"nested":{"name":"us-south-1"}},{"name":"not-a-zone"}]`)}
 	values, err := (Discovery{Runner: fake}).Zones(context.Background())

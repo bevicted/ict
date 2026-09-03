@@ -17,21 +17,27 @@ type CLI struct {
 
 // VPCCommand contains the transient inputs shared by plan and create.
 type VPCCommand struct {
-	Config        string `help:"Target configuration file." type:"path" env:"ICT_CONFIG"`
-	Target        string `help:"Configured target name." env:"ICT_TARGET"`
-	Provider      string `help:"Cluster provider (vpc-gen2 or classic)." env:"ICT_PROVIDER"`
-	Platform      string `help:"Cluster platform (kubernetes or openshift)." env:"ICT_PLATFORM"`
-	Version       string `help:"Kubernetes or OpenShift version." env:"ICT_VERSION"`
-	ResourceGroup string `help:"Existing resource group name." env:"ICT_RESOURCE_GROUP"`
-	Zone          string `help:"VPC zone." env:"ICT_ZONE"`
-	Flavor        string `help:"VPC worker flavor." env:"ICT_FLAVOR"`
-	Datacenter    string `help:"Classic data center." env:"ICT_DATACENTER"`
-	MachineType   string `help:"Classic worker machine type." env:"ICT_MACHINE_TYPE"`
-	PublicVLANID  string `name:"public-vlan-id" help:"Existing numeric Classic public VLAN ID." env:"ICT_PUBLIC_VLAN_ID"`
-	PrivateVLANID string `name:"private-vlan-id" help:"Existing numeric Classic private VLAN ID." env:"ICT_PRIVATE_VLAN_ID"`
-	WorkerCount   int    `help:"Worker count." env:"ICT_WORKER_COUNT"`
-	Owner         string `help:"Owner used when generating a name." env:"ICT_OWNER"`
-	Name          string `help:"Explicit cluster name." env:"ICT_NAME"`
+	Config                         string   `help:"Target configuration file." type:"path" env:"ICT_CONFIG"`
+	Target                         string   `help:"Configured target name." env:"ICT_TARGET"`
+	Provider                       string   `help:"Cluster provider (vpc-gen2, classic, or satellite)." env:"ICT_PROVIDER"`
+	Platform                       string   `help:"Cluster platform (kubernetes or openshift)." env:"ICT_PLATFORM"`
+	Version                        string   `help:"Kubernetes or OpenShift version." env:"ICT_VERSION"`
+	ResourceGroup                  string   `help:"Existing resource group name." env:"ICT_RESOURCE_GROUP"`
+	Zone                           string   `help:"VPC zone." env:"ICT_ZONE"`
+	Flavor                         string   `help:"VPC worker flavor." env:"ICT_FLAVOR"`
+	Datacenter                     string   `help:"Classic data center." env:"ICT_DATACENTER"`
+	MachineType                    string   `help:"Classic worker machine type." env:"ICT_MACHINE_TYPE"`
+	PublicVLANID                   string   `name:"public-vlan-id" help:"Existing numeric Classic public VLAN ID." env:"ICT_PUBLIC_VLAN_ID"`
+	PrivateVLANID                  string   `name:"private-vlan-id" help:"Existing numeric Classic private VLAN ID." env:"ICT_PRIVATE_VLAN_ID"`
+	SatelliteZones                 []string `name:"satellite-zone" help:"Satellite VPC host zone; repeat exactly three times." env:"ICT_SATELLITE_ZONES" sep:","`
+	SatelliteManagedFrom           string   `name:"satellite-managed-from" help:"Satellite management location." env:"ICT_SATELLITE_MANAGED_FROM"`
+	SatelliteHostImage             string   `name:"satellite-host-image" help:"Public RHEL image for Satellite hosts." env:"ICT_SATELLITE_HOST_IMAGE"`
+	SatelliteHostProfile           string   `name:"satellite-host-profile" help:"VPC host profile for Satellite." env:"ICT_SATELLITE_HOST_PROFILE"`
+	SatelliteSSHPublicKeyPath      string   `name:"satellite-ssh-public-key" help:"Path to an SSH public key for Satellite hosts." type:"path" env:"ICT_SATELLITE_SSH_PUBLIC_KEY"`
+	SatelliteWorkerOperatingSystem string   `name:"satellite-worker-operating-system" help:"Satellite worker operating system." env:"ICT_SATELLITE_WORKER_OPERATING_SYSTEM"`
+	WorkerCount                    int      `help:"Worker count." env:"ICT_WORKER_COUNT"`
+	Owner                          string   `help:"Owner used when generating a name." env:"ICT_OWNER"`
+	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
 }
 
 // Destroy deliberately accepts no replacement cluster inputs.
@@ -64,5 +70,5 @@ func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name}
 }
