@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -70,6 +71,91 @@ func (r Runner) Get(configPath, path string) error {
 	}
 	if _, err := r.stdout().Write(data); err != nil {
 		return fmt.Errorf("write effective config value: %w", err)
+	}
+	return nil
+}
+
+// Edit updates the discovered configuration from an editor or standard input without validation.
+func (r Runner) Edit(ctx context.Context, configPath string) error {
+	path, err := DiscoverPathFromEnvironment(configPath, r.environment())
+	if err != nil {
+		return fmt.Errorf("discover config: %w", err)
+	}
+	if r.terminal() {
+		return r.editWithEditor(ctx, path)
+	}
+	return r.replaceFromStdin(path)
+}
+
+func (r Runner) editWithEditor(ctx context.Context, path string) error {
+	if err := prepareConfigPath(path); err != nil {
+		return err
+	}
+
+	editor := strings.Fields(environmentValue(r.environment(), "EDITOR"))
+	if len(editor) == 0 {
+		return fmt.Errorf("edit config %q: EDITOR is not set", path)
+	}
+	args := append(editor[1:], path)
+	var err error
+	if r.Process != nil {
+		err = r.Process.Run(ctx, r.stdin(), r.stdout(), r.stderr(), editor[0], args...)
+	} else {
+		err = runEditor(ctx, r.environment(), r.stdin(), r.stdout(), r.stderr(), editor[0], args...)
+	}
+	if err != nil {
+		return fmt.Errorf("edit config %q with editor %q: %w", path, editor[0], err)
+	}
+	return nil
+}
+
+func (r Runner) replaceFromStdin(path string) error {
+	contents, err := io.ReadAll(r.stdin())
+	if err != nil {
+		return fmt.Errorf("read config edit from stdin: %w", err)
+	}
+	if len(contents) == 0 {
+		return fmt.Errorf("edit config %q: standard input is empty", path)
+	}
+	if err := prepareConfigParent(path); err != nil {
+		return err
+	}
+	if err := persistConfig(path, contents); err != nil {
+		return err
+	}
+	return nil
+}
+
+func prepareConfigPath(path string) error {
+	if err := prepareConfigParent(path); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("create config %q: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close config %q: %w", path, err)
+	}
+	return nil
+}
+
+func prepareConfigParent(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config directory for %q: %w", path, err)
+	}
+	return nil
+}
+
+func runEditor(ctx context.Context, environ []string, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command -- $EDITOR intentionally selects the editor.
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdin = stdin
+	command.Stdout = stdout
+	command.Stderr = stderr
+	command.Env = environ
+	if err := command.Run(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -307,6 +393,13 @@ func (r Runner) stdout() io.Writer {
 		return r.Stdout
 	}
 	return os.Stdout
+}
+
+func (r Runner) stderr() io.Writer {
+	if r.Stderr != nil {
+		return r.Stderr
+	}
+	return os.Stderr
 }
 
 func valueAt(cfg *Config, path string) (any, error) {

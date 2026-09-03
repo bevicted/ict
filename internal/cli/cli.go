@@ -50,6 +50,7 @@ type ConfigCommand struct {
 	Show ConfigShow `cmd:"" help:"Print the complete effective configuration as YAML."`
 	Get  ConfigGet  `cmd:"" help:"Print an effective configuration value by dot path."`
 	Set  ConfigSet  `cmd:"" help:"Set a stored configuration value after validating the complete result."`
+	Edit ConfigEdit `cmd:"" help:"Edit or replace stored configuration without validation."`
 }
 
 // ConfigShow contains options for config show.
@@ -67,6 +68,11 @@ type ConfigGet struct {
 type ConfigSet struct {
 	Path   string `arg:"" name:"path" help:"Dot-separated stored configuration path."`
 	Value  string `arg:"" name:"yaml-value" help:"Inline YAML value, or - to read one YAML value from stdin."`
+	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
+}
+
+// ConfigEdit contains options for config edit.
+type ConfigEdit struct {
 	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
 }
 
@@ -107,6 +113,8 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 		return r.Config.Get(command.Config.Get.Config, command.Config.Get.Path)
 	case "config set <path> <yaml-value>":
 		return r.Config.Set(command.Config.Set.Config, command.Config.Set.Path, command.Config.Set.Value)
+	case "config edit":
+		return r.Config.Edit(ctx, command.Config.Edit.Config)
 	default:
 		return nil
 	}

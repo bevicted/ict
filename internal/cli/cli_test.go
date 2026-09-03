@@ -153,4 +153,27 @@ targets:
 	if !strings.Contains(output.String(), "version: 1\n") {
 		t.Fatalf("config show output = %q", output.String())
 	}
+
+	editPath := filepath.Join(t.TempDir(), "config with spaces.yaml")
+	parsed, command, err = Parse([]string{"config", "edit", "--config", editPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Command(); got != "config edit" {
+		t.Fatalf("parsed command = %q", got)
+	}
+	if command.Config.Edit.Config != editPath {
+		t.Fatalf("config edit path = %q, want %q", command.Config.Edit.Config, editPath)
+	}
+	contents := "malformed: [\n"
+	if err := (Runner{Config: config.Runner{Stdin: strings.NewReader(contents), Terminal: func() bool { return false }}}).Run(context.Background(), parsed, command); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(editPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(stored); got != contents {
+		t.Fatalf("config edit contents = %q, want %q", got, contents)
+	}
 }

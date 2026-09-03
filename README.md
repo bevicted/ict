@@ -93,6 +93,20 @@ The value is one YAML value. Inline scalars and collections retain YAML typing, 
 
 `set` updates the stored document, whereas `show` and `get` display the effective configuration. The update preserves comments, mapping order, scalar styles, and unrelated formatting outside the replaced subtree; formatting within the replaced subtree can change.
 
+### Edit stored configuration
+
+Use `config edit` to replace the stored document without parsing or validating it:
+
+```sh
+ict config edit [--config PATH]
+```
+
+When standard input is a terminal, ICT creates missing parent directories with mode `0700` and a missing configuration file with mode `0600`, then runs the command named by `$EDITOR` against that actual file. `$EDITOR` can include arguments, for example `EDITOR="vi -f"`. A successful editor exit is a successful edit even if it leaves malformed or incomplete YAML; edits made before an editor failure are not rolled back.
+
+When standard input is not a terminal, `config edit` reads the complete input and atomically replaces the selected file with those exact nonempty bytes, using mode `0600`. This also creates missing private parent directories. Empty input is rejected without creating a missing file or changing an existing one. Piped input is never parsed or semantically validated, so use `config set` when ICT must verify a configuration update.
+
+`config edit` uses the same `--config`, `ICT_CONFIG`, and XDG discovery order as the other configuration commands.
+
 ## Lifecycle
 
 Use `plan` to review Terraform changes, `create` to apply them, and `destroy` only to destroy the saved active cluster. `create` and `destroy` use Terraform auto-approval, so review a plan first.

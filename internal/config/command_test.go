@@ -2,7 +2,9 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -405,6 +407,280 @@ func TestRunnerSetReportsMissingSourceAndUsesPrivateMode(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Errorf("config mode = %o, want 600", got)
 	}
+}
+
+func TestRunnerEditRunsEditorAgainstPrivateDestination(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config directory", "config file.yaml")
+	stdin := strings.NewReader("editor stdin")
+	var stdout, stderr bytes.Buffer
+	ctx := context.WithValue(context.Background(), "test context", "present")
+	editor := &fakeEditor{run: func(ctx context.Context, gotStdin io.Reader, gotStdout, gotStderr io.Writer, name string, args ...string) error {
+		if ctx.Value("test context") != "present" {
+			t.Error("editor did not receive command context")
+		}
+		if gotStdin != stdin || gotStdout != &stdout || gotStderr != &stderr {
+			t.Error("editor did not inherit configured streams")
+		}
+		if name != "fake-editor" || strings.Join(args, "|") != "--wait|"+path {
+			t.Errorf("editor invocation = %q %q", name, args)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("created config mode = %o, want 600", info.Mode().Perm())
+		}
+		parent, err := os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parent.Mode().Perm() != 0o700 {
+			t.Errorf("created parent mode = %o, want 700", parent.Mode().Perm())
+		}
+		return os.WriteFile(path, []byte("malformed: [\n"), 0o600)
+	}}
+	runner := Runner{
+		Stdin:    stdin,
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Environ:  []string{"EDITOR=fake-editor --wait"},
+		Terminal: func() bool { return true },
+		Process:  editor,
+	}
+	if err := runner.Edit(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "malformed: [\n"; got != want {
+		t.Errorf("editor contents = %q, want %q", got, want)
+	}
+	if _, err := Load(path); err == nil {
+		t.Error("malformed editor output unexpectedly validated")
+	}
+}
+
+func TestRunnerEditEditorInheritsEnvironmentAndStreams(t *testing.T) {
+	directory := t.TempDir()
+	script := filepath.Join(directory, "editor")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' \"$EDITOR_MARKER\" > \"$2\"\nprintf 'editor stdout'\nprintf 'editor stderr' >&2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "config with spaces.yaml")
+	var stdout, stderr bytes.Buffer
+	runner := Runner{
+		Stdin:    strings.NewReader("ignored"),
+		Stdout:   &stdout,
+		Stderr:   &stderr,
+		Environ:  []string{"EDITOR=" + script + " --argument", "EDITOR_MARKER=invalid: ["},
+		Terminal: func() bool { return true },
+	}
+	if err := runner.Edit(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "invalid: ["; got != want {
+		t.Errorf("editor environment output = %q, want %q", got, want)
+	}
+	if got := stdout.String(); got != "editor stdout" {
+		t.Errorf("editor stdout = %q", got)
+	}
+	if got := stderr.String(); got != "editor stderr" {
+		t.Errorf("editor stderr = %q", got)
+	}
+}
+
+func TestRunnerEditReportsEditorFailuresWithoutRollback(t *testing.T) {
+	t.Run("missing EDITOR", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		err := (Runner{Environ: []string{}, Terminal: func() bool { return true }}).Edit(context.Background(), path)
+		if err == nil || !strings.Contains(err.Error(), "EDITOR is not set") {
+			t.Fatalf("Edit() error = %v", err)
+		}
+	})
+	t.Run("process start failure", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		err := (Runner{Environ: []string{"EDITOR=not-an-editor"}, Terminal: func() bool { return true }}).Edit(context.Background(), path)
+		if err == nil || !strings.Contains(err.Error(), "not-an-editor") {
+			t.Fatalf("Edit() error = %v", err)
+		}
+	})
+	t.Run("editor failure", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		editor := &fakeEditor{run: func(_ context.Context, _ io.Reader, _ io.Writer, _ io.Writer, _ string, args ...string) error {
+			if err := os.WriteFile(args[len(args)-1], []byte("still malformed: ["), 0o600); err != nil {
+				return err
+			}
+			return errors.New("editor failed")
+		}}
+		err := (Runner{Environ: []string{"EDITOR=fake-editor"}, Terminal: func() bool { return true }, Process: editor}).Edit(context.Background(), path)
+		if err == nil || !strings.Contains(err.Error(), "editor failed") {
+			t.Fatalf("Edit() error = %v", err)
+		}
+		contents, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if got, want := string(contents), "still malformed: ["; got != want {
+			t.Errorf("editor changes = %q, want %q", got, want)
+		}
+	})
+	t.Run("cancellation", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		editor := &fakeEditor{run: func(context.Context, io.Reader, io.Writer, io.Writer, string, ...string) error {
+			return context.Canceled
+		}}
+		err := (Runner{Environ: []string{"EDITOR=fake-editor"}, Terminal: func() bool { return true }, Process: editor}).Edit(context.Background(), path)
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("Edit() error = %v", err)
+		}
+	})
+}
+
+func TestRunnerEditReplacesNonTerminalInputExactly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config directory", "config file.yaml")
+	contents := []byte("malformed: [\n# retained exactly\n")
+	editor := &fakeEditor{}
+	runner := Runner{
+		Stdin:    bytes.NewReader(contents),
+		Terminal: func() bool { return false },
+		Process:  editor,
+	}
+	if err := runner.Edit(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if editor.called {
+		t.Error("non-terminal input invoked editor")
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, contents) {
+		t.Errorf("stored bytes = %q, want %q", stored, contents)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("config mode = %o, want 600", info.Mode().Perm())
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent.Mode().Perm() != 0o700 {
+		t.Errorf("parent mode = %o, want 700", parent.Mode().Perm())
+	}
+}
+
+func TestRunnerEditUsesDiscoveryPrecedence(t *testing.T) {
+	explicit := filepath.Join(t.TempDir(), "explicit.yaml")
+	environment := filepath.Join(t.TempDir(), "environment.yaml")
+	configHome := t.TempDir()
+	xdg := filepath.Join(configHome, "ict", "config.yaml")
+	tests := []struct {
+		name    string
+		config  string
+		environ []string
+		path    string
+	}{
+		{"explicit", explicit, []string{"ICT_CONFIG=" + environment, "XDG_CONFIG_HOME=" + configHome}, explicit},
+		{"ICT_CONFIG", "", []string{"ICT_CONFIG=" + environment, "XDG_CONFIG_HOME=" + configHome}, environment},
+		{"XDG", "", []string{"XDG_CONFIG_HOME=" + configHome}, xdg},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := Runner{Stdin: strings.NewReader("invalid: ["), Environ: test.environ, Terminal: func() bool { return false }}
+			if err := runner.Edit(context.Background(), test.config); err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(contents), "invalid: ["; got != want {
+				t.Errorf("stored bytes = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRunnerEditRejectsEmptyInputWithoutChangingDestination(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.yaml")
+	existing := writeConfig(t, "keep this unchanged")
+	for name, path := range map[string]string{"missing": missing, "existing": existing} {
+		t.Run(name, func(t *testing.T) {
+			var original []byte
+			if name == "existing" {
+				var err error
+				original, err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := (Runner{Stdin: strings.NewReader(""), Terminal: func() bool { return false }}).Edit(context.Background(), path)
+			if err == nil || !strings.Contains(err.Error(), "standard input is empty") {
+				t.Fatalf("Edit() error = %v", err)
+			}
+			if name == "missing" {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("empty input created destination: %v", err)
+				}
+			} else if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, original) {
+				t.Errorf("empty input changed destination: %q, %v", got, err)
+			}
+			temporary, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".ict-config-*"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(temporary) != 0 {
+				t.Errorf("empty input left temporary files: %v", temporary)
+			}
+		})
+	}
+}
+
+func TestRunnerEditCleansTemporaryFileAfterAtomicWriteFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config-directory")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := (Runner{Stdin: strings.NewReader("invalid: ["), Terminal: func() bool { return false }}).Edit(context.Background(), path)
+	if err == nil || !strings.Contains(err.Error(), "replace config") {
+		t.Fatalf("Edit() error = %v", err)
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || !info.IsDir() {
+		t.Fatalf("atomic write changed destination: info=%v, err=%v", info, statErr)
+	}
+	temporary, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".ict-config-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temporary) != 0 {
+		t.Errorf("atomic write failure left temporary files: %v", temporary)
+	}
+}
+
+type fakeEditor struct {
+	called bool
+	run    func(context.Context, io.Reader, io.Writer, io.Writer, string, ...string) error
+}
+
+func (f *fakeEditor) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+	f.called = true
+	if f.run == nil {
+		return nil
+	}
+	return f.run(ctx, stdin, stdout, stderr, name, args...)
 }
 
 type errWriter struct{ err error }
