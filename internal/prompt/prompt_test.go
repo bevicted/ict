@@ -40,17 +40,34 @@ func TestSelectWithLoaderStartsFzfBeforeLoading(t *testing.T) {
 
 func TestSelectWithLoaderReturnsLoadingError(t *testing.T) {
 	bin := t.TempDir()
+	started := filepath.Join(bin, "fzf-started")
+	interrupted := filepath.Join(bin, "fzf-interrupted")
 	fzf := filepath.Join(bin, "fzf")
-	if err := os.WriteFile(fzf, []byte("#!/bin/sh\nIFS= read -r value\nwhile :; do :; done\n"), 0o700); err != nil {
+	script := "#!/bin/sh\ntrap ': > \"$FZF_INTERRUPTED\"; exit 130' INT\n: > \"$FZF_STARTED\"\nIFS= read -r value\nwhile :; do :; done\n"
+	if err := os.WriteFile(fzf, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
+	t.Setenv("FZF_STARTED", started)
+	t.Setenv("FZF_INTERRUPTED", interrupted)
 
 	_, err := SelectWithLoader(context.Background(), "resource group", func(context.Context) ([]string, error) {
-		return nil, errors.New("load failed")
+		deadline := time.Now().Add(time.Second)
+		for {
+			if _, err := os.Stat(started); err == nil {
+				return nil, errors.New("load failed")
+			}
+			if time.Now().After(deadline) {
+				return nil, errors.New("fzf did not start before loading choices")
+			}
+			time.Sleep(time.Millisecond)
+		}
 	})
 	if err == nil || err.Error() != "load failed" {
 		t.Fatalf("loading error = %v", err)
+	}
+	if _, err := os.Stat(interrupted); err != nil {
+		t.Fatalf("fzf did not receive a graceful interrupt: %v", err)
 	}
 }
 
