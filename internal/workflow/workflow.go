@@ -396,15 +396,16 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 	if strings.TrimSpace(supplied.ResourceGroup) == "" {
 		return Values{}, config.ResolvedTarget{}, errors.New("resource group is required")
 	}
+	minimumWorkers := 1
+	if supplied.Platform == "openshift" && provider != config.ProviderSatellite {
+		minimumWorkers = 2
+	}
 	workers := supplied.WorkerCount
 	if workers == 0 {
-		workers = 1
-		if supplied.Platform == "openshift" && provider == config.ProviderClassic {
-			workers = 3
-		}
+		workers = minimumWorkers
 	}
-	if workers < 1 {
-		return Values{}, config.ResolvedTarget{}, errors.New("worker count must be at least one")
+	if workers < minimumWorkers {
+		return Values{}, config.ResolvedTarget{}, fmt.Errorf("worker count must be at least %d for %s", minimumWorkers, supplied.Platform)
 	}
 	name, err := r.resolveName(supplied)
 	if err != nil {

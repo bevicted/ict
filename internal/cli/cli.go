@@ -37,7 +37,7 @@ type VPCCommand struct {
 	SatelliteHostProfile           string   `name:"satellite-host-profile" help:"VPC host profile for Satellite." env:"ICT_SATELLITE_HOST_PROFILE"`
 	SatelliteSSHPublicKeyPath      string   `name:"satellite-ssh-public-key" help:"Path to an SSH public key for Satellite hosts." type:"path" env:"ICT_SATELLITE_SSH_PUBLIC_KEY"`
 	SatelliteWorkerOperatingSystem string   `name:"satellite-worker-operating-system" help:"Satellite worker operating system." env:"ICT_SATELLITE_WORKER_OPERATING_SYSTEM"`
-	WorkerCount                    int      `help:"Worker count." env:"ICT_WORKER_COUNT"`
+	WorkerCount                    int      `help:"Worker count (default: 1 for Kubernetes, 2 for OpenShift)." env:"ICT_WORKER_COUNT"`
 	Owner                          string   `help:"Owner used when generating a name." env:"ICT_OWNER"`
 	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
 }

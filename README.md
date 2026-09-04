@@ -134,7 +134,7 @@ Provider-specific inputs are:
 - Classic: `--datacenter`, `--machine-type`, `--public-vlan-id`, and `--private-vlan-id`. Both VLAN IDs must name existing numeric VLANs. ICT does not create or manage Classic VLANs. Classic commands also require `IAAS_CLASSIC_USERNAME` and `IAAS_CLASSIC_API_KEY` in the environment.
 - Satellite: repeat `--satellite-zone` exactly three times in one region, then provide `--satellite-managed-from`, `--satellite-host-image`, and `--satellite-ssh-public-key`. Satellite requires OpenShift. `--satellite-host-profile` defaults to `bx2-4x16`, and `--satellite-worker-operating-system` defaults to `RHCOS`.
 
-`--worker-count` defaults to 1, except Classic OpenShift defaults to 3. Satellite accepts only 1 or 3 workers. Satellite creates a location, three control-plane hosts, and worker hosts, so it can incur substantial VPC, compute, and Satellite costs. Confirm all selected zones, image, profile, capacity, and pricing before `create`.
+`--worker-count` defaults to 1 for Kubernetes and 2 for OpenShift. Satellite is the exception and accepts only 1 or 3 workers. Satellite creates a location, three control-plane hosts, and worker hosts, so it can incur substantial VPC, compute, and Satellite costs. Confirm all selected zones, image, profile, capacity, and pricing before `create`.
 
 When target, provider, or any required provider input is omitted, ICT may use IBM Cloud CLI JSON discovery and `fzf` only from an interactive terminal. Without a terminal or `fzf`, it returns the same missing-input error rather than guessing.
 

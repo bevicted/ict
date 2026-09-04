@@ -49,12 +49,12 @@ variable "kube_version" {
 }
 
 variable "worker_count" {
-  description = "Minimum worker count for the selected offering, unless explicitly overridden."
+  description = "Worker count, with a minimum of one for Kubernetes and two for OpenShift outside Satellite."
   type        = number
 
   validation {
-    condition     = var.worker_count >= 1
-    error_message = "worker_count must be at least one."
+    condition     = var.worker_count >= (var.platform == "openshift" && var.cluster_mode != "satellite" ? 2 : 1)
+    error_message = "worker_count must be at least one for Kubernetes or at least two for OpenShift outside Satellite."
   }
 }
 

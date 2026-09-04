@@ -410,7 +410,7 @@ func TestClassicLifecyclePersistsAndOmitsVPCValues(t *testing.T) {
 			t.Fatalf("Classic tfvars contains VPC-only field %s", absent)
 		}
 	}
-	for _, present := range []string{"\"datacenter\":\"dal10\"", "\"machine_type\":\"bx2.2x8\"", "\"public_vlan_id\":\"12345\"", "\"private_vlan_id\":\"67890\"", "\"worker_count\":3"} {
+	for _, present := range []string{"\"datacenter\":\"dal10\"", "\"machine_type\":\"bx2.2x8\"", "\"public_vlan_id\":\"12345\"", "\"private_vlan_id\":\"67890\"", "\"worker_count\":2"} {
 		if !strings.Contains(string(tfvars), present) {
 			t.Fatalf("Classic tfvars missing %s", present)
 		}
@@ -562,19 +562,26 @@ func TestClassicTargetIsRejectedBeforeDiscovery(t *testing.T) {
 	}
 }
 
-func TestClassicWorkerDefaultsAndExplicitOverride(t *testing.T) {
+func TestWorkerDefaultsAndExplicitOverride(t *testing.T) {
 	for name, test := range map[string]struct {
+		inputs   func(*testing.T) Inputs
 		platform string
 		workers  int
 		want     int
 	}{
-		"Kubernetes default":         {platform: "kubernetes", want: 1},
-		"OpenShift default":          {platform: "openshift", want: 3},
-		"explicit positive override": {platform: "openshift", workers: 2, want: 2},
+		"VPC Kubernetes default": {inputs: configuredInputs, platform: "kubernetes", want: 1},
+		"VPC OpenShift default":  {inputs: configuredInputs, platform: "openshift", want: 2},
+		"Classic OpenShift default": {
+			inputs: configuredClassicInputs,
+			want:   2,
+		},
+		"explicit positive override": {inputs: configuredInputs, platform: "openshift", workers: 3, want: 3},
 	} {
 		t.Run(name, func(t *testing.T) {
-			inputs := configuredClassicInputs(t)
-			inputs.Platform = test.platform
+			inputs := test.inputs(t)
+			if test.platform != "" {
+				inputs.Platform = test.platform
+			}
 			inputs.WorkerCount = test.workers
 			cfg, err := config.Load(inputs.ConfigPath)
 			if err != nil {
@@ -582,22 +589,34 @@ func TestClassicWorkerDefaultsAndExplicitOverride(t *testing.T) {
 			}
 			values, _, err := newRunner(t.TempDir(), &fakeTerraform{}).resolve(context.Background(), cfg, inputs)
 			if err != nil || values.WorkerCount != test.want {
-				t.Fatalf("Classic workers = %d, %v, want %d", values.WorkerCount, err, test.want)
+				t.Fatalf("workers = %d, %v, want %d", values.WorkerCount, err, test.want)
 			}
 		})
 	}
 }
 
-func TestClassicRejectsNonpositiveWorkerOverride(t *testing.T) {
-	inputs := configuredClassicInputs(t)
-	inputs.WorkerCount = -1
-	cfg, err := config.Load(inputs.ConfigPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = newRunner(t.TempDir(), &fakeTerraform{}).resolve(context.Background(), cfg, inputs)
-	if err == nil || !strings.Contains(err.Error(), "worker count must be at least one") {
-		t.Fatalf("Classic nonpositive worker count error = %v", err)
+func TestWorkerMinimums(t *testing.T) {
+	for name, test := range map[string]struct {
+		platform string
+		workers  int
+		want     string
+	}{
+		"Kubernetes rejects negative": {platform: "kubernetes", workers: -1, want: "at least 1 for kubernetes"},
+		"OpenShift rejects one":       {platform: "openshift", workers: 1, want: "at least 2 for openshift"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs := configuredInputs(t)
+			inputs.Platform = test.platform
+			inputs.WorkerCount = test.workers
+			cfg, err := config.Load(inputs.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = newRunner(t.TempDir(), &fakeTerraform{}).resolve(context.Background(), cfg, inputs)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("worker count error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
