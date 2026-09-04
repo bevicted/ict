@@ -100,18 +100,31 @@ type RecoveryContext struct {
 
 // CommandRunner is the injectable Terraform subprocess seam.
 type CommandRunner interface {
-	Run(context.Context, []string, string, ...string) ([]byte, error)
+	Run(context.Context, []string, io.Writer, io.Writer, string, ...string) error
+	Output(context.Context, []string, string, ...string) ([]byte, error)
 }
 
 // ExecRunner invokes executable commands from PATH.
 type ExecRunner struct{}
 
-func (ExecRunner) Run(ctx context.Context, environ []string, command string, args ...string) ([]byte, error) {
-	if command != "terraform" {
-		return nil, fmt.Errorf("unsupported Terraform command %q", command)
+func (ExecRunner) Run(ctx context.Context, environ []string, stdout, stderr io.Writer, command string, args ...string) error {
+	cmd, err := terraformCommand(ctx, environ, command, args...)
+	if err != nil {
+		return err
 	}
-	cmd := exec.CommandContext(ctx, "terraform", args...)
-	cmd.Env = environ
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("run terraform: %w", err)
+	}
+	return nil
+}
+
+func (ExecRunner) Output(ctx context.Context, environ []string, command string, args ...string) ([]byte, error) {
+	cmd, err := terraformCommand(ctx, environ, command, args...)
+	if err != nil {
+		return nil, err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if detail := strings.TrimSpace(string(output)); detail != "" {
@@ -122,12 +135,23 @@ func (ExecRunner) Run(ctx context.Context, environ []string, command string, arg
 	return output, nil
 }
 
+func terraformCommand(ctx context.Context, environ []string, command string, args ...string) (*exec.Cmd, error) {
+	if command != "terraform" {
+		return nil, fmt.Errorf("unsupported Terraform command %q", command)
+	}
+	cmd := exec.CommandContext(ctx, "terraform", args...)
+	cmd.Env = environ
+	return cmd, nil
+}
+
 // Runner wires filesystem and subprocess dependencies for a command invocation.
 type Runner struct {
 	Terraform CommandRunner
 	IBMCloud  ibmcloud.Runner
 	Workspace string
 	Environ   []string
+	Stdout    io.Writer
+	Stderr    io.Writer
 	Terminal  func() bool
 	Now       func() time.Time
 	Suffix    func() string
@@ -177,6 +201,20 @@ func (r Runner) terraform() CommandRunner {
 	return ExecRunner{}
 }
 
+func (r Runner) stdout() io.Writer {
+	if r.Stdout != nil {
+		return r.Stdout
+	}
+	return os.Stdout
+}
+
+func (r Runner) stderr() io.Writer {
+	if r.Stderr != nil {
+		return r.Stderr
+	}
+	return os.Stderr
+}
+
 func (r Runner) terminal() bool {
 	if r.Terminal != nil {
 		return r.Terminal()
@@ -214,7 +252,7 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 		return err
 	}
 	environment := r.environment(target.Environment())
-	if _, err := r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
 		return err
 	}
 	managed, err := r.hasState(ctx, environment, workspace)
@@ -241,10 +279,10 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 				return err
 			}
 		}
-		_, err = r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "apply", "-input=false", "-auto-approve", "-var-file="+tfvarsPath)
+		err = r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "apply", "-input=false", "-auto-approve", "-var-file="+tfvarsPath)
 		return err
 	}
-	if _, err := r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "plan", "-input=false", "-var-file="+tfvarsPath); err != nil {
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-var-file="+tfvarsPath); err != nil {
 		return err
 	}
 	if !managed {
@@ -287,11 +325,10 @@ func (r Runner) Destroy(ctx context.Context) error {
 	if !managed {
 		return errors.New("Terraform state has no managed resources; refusing destroy")
 	}
-	if _, err := r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
 		return err
 	}
-	_, err = r.terraform().Run(ctx, environment, "terraform", "-chdir="+workspace, "destroy", "-input=false", "-auto-approve", "-var-file="+tfvarsPath)
-	return err
+	return r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "destroy", "-input=false", "-auto-approve", "-var-file="+tfvarsPath)
 }
 
 func (r Runner) hasState(ctx context.Context, environ []string, workspace string) (bool, error) {
@@ -302,7 +339,7 @@ func (r Runner) hasState(ctx context.Context, environ []string, workspace string
 		return false, fmt.Errorf("inspect Terraform state file: %w", err)
 	}
 
-	output, err := r.terraform().Run(ctx, environ, "terraform", "-chdir="+workspace, "state", "list")
+	output, err := r.terraform().Output(ctx, environ, "terraform", "-chdir="+workspace, "state", "list")
 	if err != nil {
 		return false, err
 	}

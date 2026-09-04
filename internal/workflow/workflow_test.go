@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,16 @@ func (f *fakeIBMCloud) Run(_ context.Context, environ []string, _ string, args .
 	return nil, errors.New("unexpected discovery command")
 }
 
-func (f *fakeTerraform) Run(_ context.Context, environ []string, _ string, args ...string) ([]byte, error) {
+func (f *fakeTerraform) Run(_ context.Context, environ []string, _, _ io.Writer, _ string, args ...string) error {
+	_, err := f.run(environ, args...)
+	return err
+}
+
+func (f *fakeTerraform) Output(_ context.Context, environ []string, _ string, args ...string) ([]byte, error) {
+	return f.run(environ, args...)
+}
+
+func (f *fakeTerraform) run(environ []string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string(nil), args...))
 	f.environs = append(f.environs, append([]string(nil), environ...))
 	if len(args) >= 2 && args[1] == "init" && f.initErr != nil {
@@ -83,7 +93,27 @@ func (f *fakeTerraform) Run(_ context.Context, environ []string, _ string, args 
 	return nil, nil
 }
 
-func TestExecRunnerReportsTerraformOutputOnFailure(t *testing.T) {
+func TestExecRunnerStreamsTerraformOutput(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "terraform")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'terraform stdout\\n'\nprintf 'terraform stderr\\n' >&2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	var stdout, stderr strings.Builder
+
+	if err := (ExecRunner{}).Run(context.Background(), os.Environ(), &stdout, &stderr, "terraform"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "terraform stdout\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	if got, want := stderr.String(), "terraform stderr\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestExecRunnerReportsCapturedTerraformOutputOnFailure(t *testing.T) {
 	directory := t.TempDir()
 	executable := filepath.Join(directory, "terraform")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'Error: invalid configuration\\n' >&2\nexit 1\n"), 0o755); err != nil {
@@ -91,9 +121,9 @@ func TestExecRunnerReportsTerraformOutputOnFailure(t *testing.T) {
 	}
 	t.Setenv("PATH", directory)
 
-	_, err := (ExecRunner{}).Run(context.Background(), os.Environ(), "terraform")
+	_, err := (ExecRunner{}).Output(context.Background(), os.Environ(), "terraform")
 	if err == nil {
-		t.Fatal("Run succeeded, want command failure")
+		t.Fatal("Output succeeded, want command failure")
 	}
 	want := "run terraform: exit status 1: Error: invalid configuration"
 	if err.Error() != want {
