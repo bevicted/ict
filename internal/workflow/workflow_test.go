@@ -83,6 +83,24 @@ func (f *fakeTerraform) Run(_ context.Context, environ []string, _ string, args 
 	return nil, nil
 }
 
+func TestExecRunnerReportsTerraformOutputOnFailure(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "terraform")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'Error: invalid configuration\\n' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+
+	_, err := (ExecRunner{}).Run(context.Background(), os.Environ(), "terraform")
+	if err == nil {
+		t.Fatal("Run succeeded, want command failure")
+	}
+	want := "run terraform: exit status 1: Error: invalid configuration"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
 const testConfig = `version: 1
 targets:
   example:

@@ -114,6 +114,9 @@ func (ExecRunner) Run(ctx context.Context, environ []string, command string, arg
 	cmd.Env = environ
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if detail := strings.TrimSpace(string(output)); detail != "" {
+			return output, fmt.Errorf("run terraform: %w: %s", err, detail)
+		}
 		return output, fmt.Errorf("run terraform: %w", err)
 	}
 	return output, nil
