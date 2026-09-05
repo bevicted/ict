@@ -47,6 +47,30 @@ func Workspace(stateID string) (string, error) {
 	return filepath.Join(root, stateID), nil
 }
 
+// ListWorkspaces returns the valid immediate workspace directories in lexical order.
+func ListWorkspaces() ([]string, error) {
+	root, err := StateRoot()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read Terraform state root: %w", err)
+	}
+
+	workspaces := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !stateIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		workspaces = append(workspaces, entry.Name())
+	}
+	return workspaces, nil
+}
+
 // Materialize writes the canonical Terraform files without altering state files.
 func Materialize(workspace string) error {
 	if err := os.MkdirAll(filepath.Join(workspace, ".cluster"), 0o700); err != nil {

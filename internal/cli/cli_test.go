@@ -191,6 +191,44 @@ func TestStateIDIsLifecycleScoped(t *testing.T) {
 	}
 }
 
+func TestListAliasesProduceIdenticalOutput(t *testing.T) {
+	stateHome := t.TempDir()
+	root := filepath.Join(stateHome, "ict")
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	for _, name := range []string{"zeta", "alpha", "plan-only"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, name := range []string{"list", "ls"} {
+		t.Run(name, func(t *testing.T) {
+			parsed, command, err := Parse([]string{name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := parsed.Command(); got != "list" {
+				t.Fatalf("parsed command = %q, want list", got)
+			}
+			var output bytes.Buffer
+			if err := (Runner{Stdout: &output}).Run(context.Background(), parsed, command); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := output.String(), "alpha\nplan-only\nzeta\n"; got != want {
+				t.Fatalf("output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestListRejectsStateID(t *testing.T) {
+	for _, args := range [][]string{{"list", "--state-id", "one"}, {"ls", "--state-id", "one"}} {
+		if _, _, err := Parse(args); err == nil {
+			t.Fatalf("Parse(%q) accepted a state ID", args)
+		}
+	}
+}
+
 func TestLifecycleWorkspaceSelection(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)

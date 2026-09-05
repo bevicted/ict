@@ -3,6 +3,9 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"os"
 
 	"github.com/alecthomas/kong"
 	"github.com/bevicted/ict/internal/config"
@@ -15,6 +18,7 @@ type CLI struct {
 	Plan    VPCCommand    `cmd:"" help:"Create a non-mutating Terraform plan."`
 	Create  VPCCommand    `cmd:"" help:"Create or safely resume a cluster."`
 	Destroy Destroy       `cmd:"" help:"Destroy only the currently managed cluster."`
+	List    ListCommand   `cmd:"" aliases:"ls" help:"List known Terraform state workspaces."`
 	Config  ConfigCommand `cmd:"" help:"Inspect effective configuration."`
 }
 
@@ -54,6 +58,9 @@ type VPCCommand struct {
 type Destroy struct {
 	StateID string `name:"state-id" help:"Terraform state workspace identifier." env:"ICT_STATE_ID" default:"default"`
 }
+
+// ListCommand deliberately accepts no options.
+type ListCommand struct{}
 
 // ConfigCommand contains configuration inspection and mutation commands.
 type ConfigCommand struct {
@@ -101,6 +108,7 @@ func Parse(args []string) (*kong.Context, *CLI, error) {
 type Runner struct {
 	Workflow workflow.Runner
 	Config   config.Runner
+	Stdout   io.Writer
 }
 
 // Run dispatches the selected command.
@@ -129,6 +137,8 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 			return err
 		}
 		return runner.Destroy(ctx)
+	case "list":
+		return r.list()
 	case "config show":
 		return r.Config.Show(command.Config.Show.Config)
 	case "config get <path>":
@@ -140,6 +150,26 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 	default:
 		return nil
 	}
+}
+
+func (r Runner) list() error {
+	workspaces, err := ictterraform.ListWorkspaces()
+	if err != nil {
+		return err
+	}
+	for _, workspace := range workspaces {
+		if _, err := fmt.Fprintln(r.stdout(), workspace); err != nil {
+			return fmt.Errorf("write state workspace list: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r Runner) stdout() io.Writer {
+	if r.Stdout != nil {
+		return r.Stdout
+	}
+	return os.Stdout
 }
 
 func (r Runner) lifecycle(stateID string) (workflow.Runner, error) {
