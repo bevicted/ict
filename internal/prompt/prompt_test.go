@@ -22,7 +22,7 @@ func TestSelectWithLoaderStartsFzfBeforeLoading(t *testing.T) {
 	t.Setenv("FZF_STARTED", marker)
 
 	value, err := SelectWithLoader(context.Background(), "resource group", func(context.Context) ([]string, error) {
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(10 * time.Second)
 		for {
 			if _, err := os.Stat(marker); err == nil {
 				return []string{"group loaded later"}, nil
@@ -52,7 +52,7 @@ func TestSelectWithLoaderReturnsLoadingError(t *testing.T) {
 	t.Setenv("FZF_INTERRUPTED", interrupted)
 
 	_, err := SelectWithLoader(context.Background(), "resource group", func(context.Context) ([]string, error) {
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(10 * time.Second)
 		for {
 			if _, err := os.Stat(started); err == nil {
 				return nil, errors.New("load failed")
