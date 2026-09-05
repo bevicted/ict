@@ -209,6 +209,17 @@ variable "satellite_ssh_key_id" {
   }
 }
 
+variable "satellite_worker_instance_ids" {
+  description = "Existing Satellite worker VSI IDs. Terraform reads and assigns them but never manages the VSIs."
+  type        = list(string)
+  default     = null
+
+  validation {
+    condition     = var.satellite_worker_instance_ids == null || (length(var.satellite_worker_instance_ids) > 0 && length(distinct(var.satellite_worker_instance_ids)) == length(var.satellite_worker_instance_ids) && alltrue([for id in var.satellite_worker_instance_ids : trimspace(id) != ""]))
+    error_message = "satellite_worker_instance_ids must contain distinct, non-blank IDs."
+  }
+}
+
 variable "satellite_worker_operating_system" {
   description = "Operating system for the Satellite OpenShift default worker pool."
   type        = string

@@ -64,6 +64,7 @@ type Inputs struct {
 	SatelliteHostProfile           string
 	SatelliteSSHPublicKeyPath      string
 	SatelliteSSHKeyID              string
+	SatelliteWorkerInstanceIDs     []string
 	SatelliteWorkerOperatingSystem string
 	WorkerCount                    int
 	Owner                          string
@@ -95,6 +96,7 @@ type Values struct {
 	SatelliteHostProfile           string   `json:"satellite_host_profile,omitempty"`
 	SatelliteSSHPublicKey          string   `json:"satellite_ssh_public_key,omitempty"`
 	SatelliteSSHKeyID              string   `json:"satellite_ssh_key_id,omitempty"`
+	SatelliteWorkerInstanceIDs     []string `json:"satellite_worker_instance_ids,omitempty"`
 	SatelliteWorkerOperatingSystem string   `json:"satellite_worker_operating_system,omitempty"`
 }
 
@@ -477,14 +479,17 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
-		if !hostProfilePattern.MatchString(supplied.SatelliteHostProfile) {
+		if len(supplied.SatelliteWorkerInstanceIDs) > 0 && len(supplied.SatelliteWorkerInstanceIDs) != workers {
+			return Values{}, config.ResolvedTarget{}, fmt.Errorf("Satellite requires exactly %d satellite-worker-instance-id values", workers)
+		}
+		if len(supplied.SatelliteWorkerInstanceIDs) == 0 && !hostProfilePattern.MatchString(supplied.SatelliteHostProfile) {
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid Satellite host profile %q", supplied.SatelliteHostProfile)
 		}
 		if supplied.SatelliteWorkerOperatingSystem != "RHCOS" && supplied.SatelliteWorkerOperatingSystem != "REDHAT_8_64" {
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid Satellite worker operating system %q", supplied.SatelliteWorkerOperatingSystem)
 		}
 		key := ""
-		if supplied.SatelliteSSHKeyID == "" {
+		if len(supplied.SatelliteWorkerInstanceIDs) == 0 && supplied.SatelliteSSHKeyID == "" {
 			key, err = readSSHPublicKey(supplied.SatelliteSSHPublicKeyPath)
 			if err != nil {
 				return Values{}, config.ResolvedTarget{}, err
@@ -494,14 +499,14 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
-		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "satellite", Platform: "openshift", KubeVersion: version, WorkerCount: workers, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), SatelliteZones: slices.Clone(supplied.SatelliteZones), SatelliteManagedFrom: supplied.SatelliteManagedFrom, SatelliteLocationID: supplied.SatelliteLocationID, SatelliteHostImage: supplied.SatelliteHostImage, SatelliteHostProfile: supplied.SatelliteHostProfile, SatelliteSSHPublicKey: key, SatelliteSSHKeyID: supplied.SatelliteSSHKeyID, SatelliteWorkerOperatingSystem: supplied.SatelliteWorkerOperatingSystem}, target, nil
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "satellite", Platform: "openshift", KubeVersion: version, WorkerCount: workers, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), SatelliteZones: slices.Clone(supplied.SatelliteZones), SatelliteManagedFrom: supplied.SatelliteManagedFrom, SatelliteLocationID: supplied.SatelliteLocationID, SatelliteHostImage: supplied.SatelliteHostImage, SatelliteHostProfile: supplied.SatelliteHostProfile, SatelliteSSHPublicKey: key, SatelliteSSHKeyID: supplied.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: slices.Clone(supplied.SatelliteWorkerInstanceIDs), SatelliteWorkerOperatingSystem: supplied.SatelliteWorkerOperatingSystem}, target, nil
 	default:
 		return Values{}, config.ResolvedTarget{}, fmt.Errorf("provider %q is not supported by this lifecycle", supplied.Provider)
 	}
 }
 
 func satelliteDefaults(in *Inputs) {
-	if in.SatelliteHostProfile == "" {
+	if len(in.SatelliteWorkerInstanceIDs) == 0 && in.SatelliteHostProfile == "" {
 		in.SatelliteHostProfile = "bx2-4x16"
 	}
 	if in.SatelliteWorkerOperatingSystem == "" {
@@ -838,7 +843,7 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 			}
 			d.Environ = r.environment(regional.Environment())
 		}
-		if in.SatelliteHostProfile == "" {
+		if len(in.SatelliteWorkerInstanceIDs) == 0 && in.SatelliteHostProfile == "" {
 			value, err := prompt.SelectWithLoader(ctx, "Satellite host profile", d.SatelliteHostProfiles)
 			if err != nil {
 				return in, err
@@ -852,14 +857,14 @@ func (r Runner) discover(ctx context.Context, cfg *config.Config, in Inputs) (In
 			}
 			in.SatelliteWorkerOperatingSystem = value
 		}
-		if in.SatelliteHostImage == "" {
+		if len(in.SatelliteWorkerInstanceIDs) == 0 && in.SatelliteHostImage == "" {
 			value, err := prompt.SelectWithLoader(ctx, "Satellite host image", d.SatelliteHostImages)
 			if err != nil {
 				return in, err
 			}
 			in.SatelliteHostImage = value
 		}
-		if in.SatelliteSSHKeyID == "" && in.SatelliteSSHPublicKeyPath == "" {
+		if len(in.SatelliteWorkerInstanceIDs) == 0 && in.SatelliteSSHKeyID == "" && in.SatelliteSSHPublicKeyPath == "" {
 			values, err := publicKeyPaths()
 			if err != nil {
 				return in, err
@@ -919,10 +924,10 @@ func normalizeVPCReuseInputs(in *Inputs, provider config.Provider) error {
 }
 
 func normalizeSatelliteReuseInputs(in *Inputs, provider config.Provider) error {
-	hasReuseIDs := in.SatelliteLocationID != "" || in.SatelliteSSHKeyID != ""
+	hasReuseIDs := in.SatelliteLocationID != "" || in.SatelliteSSHKeyID != "" || len(in.SatelliteWorkerInstanceIDs) > 0
 	if provider != config.ProviderSatellite {
 		if hasReuseIDs {
-			return errors.New("Satellite location and SSH key IDs are only supported by the satellite provider")
+			return errors.New("Satellite location, SSH key, and worker instance IDs are only supported by the satellite provider")
 		}
 		return nil
 	}
@@ -934,14 +939,31 @@ func normalizeSatelliteReuseInputs(in *Inputs, provider config.Provider) error {
 	if err != nil {
 		return err
 	}
+	workerIDs, err := normalizeIDList("satellite-worker-instance-id", in.SatelliteWorkerInstanceIDs)
+	if err != nil {
+		return err
+	}
+	sort.Strings(workerIDs)
 	if locationID != "" && strings.TrimSpace(in.SatelliteManagedFrom) != "" {
 		return errors.New("satellite-managed-from cannot be used with satellite-location-id")
 	}
 	if keyID != "" && strings.TrimSpace(in.SatelliteSSHPublicKeyPath) != "" {
 		return errors.New("satellite-ssh-key-id cannot be used with satellite-ssh-public-key")
 	}
+	if len(workerIDs) > 0 {
+		if locationID == "" {
+			return errors.New("satellite-worker-instance-id requires satellite-location-id")
+		}
+		if in.VPCID != "" || len(in.SubnetIDs) > 0 || len(in.PublicGatewayIDs) > 0 {
+			return errors.New("VPC networking inputs cannot be used with satellite-worker-instance-id")
+		}
+		if keyID != "" || strings.TrimSpace(in.SatelliteSSHPublicKeyPath) != "" || strings.TrimSpace(in.SatelliteHostImage) != "" || strings.TrimSpace(in.SatelliteHostProfile) != "" {
+			return errors.New("Satellite image, profile, and SSH key inputs cannot be used with satellite-worker-instance-id")
+		}
+	}
 	in.SatelliteLocationID = locationID
 	in.SatelliteSSHKeyID = keyID
+	in.SatelliteWorkerInstanceIDs = workerIDs
 	return nil
 }
 
@@ -985,14 +1007,17 @@ func validVPCReuseValues(values Values) bool {
 }
 
 func validSatelliteReuseValues(values Values) bool {
-	inputs := Inputs{VPCID: values.VPCID, SubnetIDs: values.SubnetIDs, PublicGatewayIDs: values.PublicGatewayIDs, SatelliteManagedFrom: values.SatelliteManagedFrom, SatelliteLocationID: values.SatelliteLocationID, SatelliteSSHKeyID: values.SatelliteSSHKeyID}
+	inputs := Inputs{VPCID: values.VPCID, SubnetIDs: values.SubnetIDs, PublicGatewayIDs: values.PublicGatewayIDs, SatelliteManagedFrom: values.SatelliteManagedFrom, SatelliteLocationID: values.SatelliteLocationID, SatelliteSSHKeyID: values.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: values.SatelliteWorkerInstanceIDs}
 	if err := normalizeVPCReuseInputs(&inputs, config.ProviderSatellite); err != nil {
 		return false
 	}
 	if err := normalizeSatelliteReuseInputs(&inputs, config.ProviderSatellite); err != nil {
 		return false
 	}
-	return inputs.VPCID == values.VPCID && slices.Equal(inputs.SubnetIDs, values.SubnetIDs) && slices.Equal(inputs.PublicGatewayIDs, values.PublicGatewayIDs) && inputs.SatelliteLocationID == values.SatelliteLocationID && inputs.SatelliteSSHKeyID == values.SatelliteSSHKeyID
+	if len(inputs.SatelliteWorkerInstanceIDs) > 0 && len(inputs.SatelliteWorkerInstanceIDs) != values.WorkerCount {
+		return false
+	}
+	return inputs.VPCID == values.VPCID && slices.Equal(inputs.SubnetIDs, values.SubnetIDs) && slices.Equal(inputs.PublicGatewayIDs, values.PublicGatewayIDs) && inputs.SatelliteLocationID == values.SatelliteLocationID && inputs.SatelliteSSHKeyID == values.SatelliteSSHKeyID && slices.Equal(inputs.SatelliteWorkerInstanceIDs, values.SatelliteWorkerInstanceIDs)
 }
 
 func missingFields(in Inputs) []string {
@@ -1016,15 +1041,17 @@ func missingFields(in Inputs) []string {
 			}
 		}
 	case config.ProviderSatellite:
-		for _, field := range []struct{ name, value string }{{"satellite-host-image", in.SatelliteHostImage}} {
-			if field.value == "" {
-				fields = append(fields, field.name)
+		if len(in.SatelliteWorkerInstanceIDs) == 0 {
+			for _, field := range []struct{ name, value string }{{"satellite-host-image", in.SatelliteHostImage}} {
+				if field.value == "" {
+					fields = append(fields, field.name)
+				}
 			}
 		}
 		if in.SatelliteLocationID == "" && in.SatelliteManagedFrom == "" {
 			fields = append(fields, "satellite-managed-from")
 		}
-		if in.SatelliteSSHKeyID == "" && in.SatelliteSSHPublicKeyPath == "" {
+		if len(in.SatelliteWorkerInstanceIDs) == 0 && in.SatelliteSSHKeyID == "" && in.SatelliteSSHPublicKeyPath == "" {
 			fields = append(fields, "satellite-ssh-public-key")
 		}
 		if len(in.SatelliteZones) != 3 {
@@ -1183,9 +1210,10 @@ func validateRecoveryValues(values Values, fingerprint string) (config.Provider,
 		return config.ProviderClassic, nil
 	case "satellite":
 		region, err := satelliteRegion(values.SatelliteZones)
-		usingManagedKey := values.SatelliteSSHKeyID != ""
+		usingReusedWorkers := len(values.SatelliteWorkerInstanceIDs) > 0
+		usingManagedKey := !usingReusedWorkers && values.SatelliteSSHKeyID != ""
 		usingReusedLocation := values.SatelliteLocationID != ""
-		if err != nil || region != values.Region || values.Platform != "openshift" || !satelliteClusterPattern.MatchString(values.ClusterName) || (usingReusedLocation && values.SatelliteManagedFrom != "") || (!usingReusedLocation && strings.TrimSpace(values.SatelliteManagedFrom) == "") || strings.TrimSpace(values.SatelliteHostImage) == "" || !hostProfilePattern.MatchString(values.SatelliteHostProfile) || (values.SatelliteWorkerOperatingSystem != "RHCOS" && values.SatelliteWorkerOperatingSystem != "REDHAT_8_64") || values.SatelliteSSHPublicKey != "" || (usingManagedKey && fingerprint != "") || (!usingManagedKey && fingerprint == "") || (values.WorkerCount != 1 && values.WorkerCount != 3) || !validSatelliteReuseValues(values) || !emptyValues(values, "satellite") {
+		if err != nil || region != values.Region || values.Platform != "openshift" || !satelliteClusterPattern.MatchString(values.ClusterName) || (usingReusedLocation && values.SatelliteManagedFrom != "") || (!usingReusedLocation && strings.TrimSpace(values.SatelliteManagedFrom) == "") || (!usingReusedWorkers && (strings.TrimSpace(values.SatelliteHostImage) == "" || !hostProfilePattern.MatchString(values.SatelliteHostProfile))) || (usingReusedWorkers && (values.SatelliteHostImage != "" || values.SatelliteHostProfile != "" || values.SatelliteSSHKeyID != "")) || (values.SatelliteWorkerOperatingSystem != "RHCOS" && values.SatelliteWorkerOperatingSystem != "REDHAT_8_64") || values.SatelliteSSHPublicKey != "" || (usingManagedKey && fingerprint != "") || (!usingManagedKey && !usingReusedWorkers && fingerprint == "") || (usingReusedWorkers && fingerprint != "") || (values.WorkerCount != 1 && values.WorkerCount != 3) || !validSatelliteReuseValues(values) || !emptyValues(values, "satellite") {
 			return "", errors.New("invalid recovery values")
 		}
 		return config.ProviderSatellite, nil
@@ -1197,9 +1225,9 @@ func validateRecoveryValues(values Values, fingerprint string) (config.Provider,
 func emptyValues(values Values, provider string) bool {
 	switch provider {
 	case "vpc":
-		return values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && values.SatelliteWorkerOperatingSystem == ""
+		return values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
 	case "classic":
-		return values.Zone == "" && values.Flavor == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && values.SatelliteWorkerOperatingSystem == ""
+		return values.Zone == "" && values.Flavor == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
 	case "satellite":
 		return values.Zone == "" && values.Flavor == "" && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
 	default:
@@ -1249,7 +1277,11 @@ func decodeValues(data []byte) (Values, error) {
 
 func recoveryValuesFromTFVars(values Values, fingerprint string) (Values, error) {
 	if values.ClusterMode == "satellite" {
-		if values.SatelliteSSHKeyID == "" {
+		if len(values.SatelliteWorkerInstanceIDs) > 0 {
+			if values.SatelliteSSHPublicKey != "" || fingerprint != "" {
+				return Values{}, errors.New("invalid Satellite recovery values")
+			}
+		} else if values.SatelliteSSHKeyID == "" {
 			key, err := parseSSHPublicKey(values.SatelliteSSHPublicKey)
 			if err != nil || key != values.SatelliteSSHPublicKey || sshPublicKeyFingerprint(key) != fingerprint {
 				return Values{}, errors.New("invalid Satellite recovery values")

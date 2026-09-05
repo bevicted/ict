@@ -104,6 +104,94 @@ run "satellite_reuse_maps_unordered_networking_and_suppresses_control_plane" {
   }
 }
 
+run "satellite_reused_workers_are_unordered_and_create_only_assignments" {
+  command = plan
+
+  variables {
+    cluster_name                      = "synthetic-satellite"
+    resource_group_name               = "fixture-resource-group"
+    region                            = "us-south"
+    cluster_mode                      = "satellite"
+    platform                          = "openshift"
+    kube_version                      = "4.17_openshift"
+    worker_count                      = 3
+    satellite_zones                   = ["us-south-1", "us-south-2", "us-south-3"]
+    satellite_location_id             = "location-existing"
+    satellite_worker_instance_ids     = ["worker-3", "worker-1", "worker-2"]
+    satellite_worker_operating_system = "RHCOS"
+  }
+
+  override_data {
+    target = data.ibm_satellite_location.satellite[0]
+    values = {
+      id                  = "location-existing"
+      host_attached_count = 3
+      zones               = ["us-south-1", "us-south-2", "us-south-3"]
+      hosts = [
+        { host_id = "host-1", host_name = "worker-1", cluster_name = "", status = "ready", zone = "us-south-1" },
+        { host_id = "host-2", host_name = "worker-2", cluster_name = "", status = "ready", zone = "us-south-2" },
+        { host_id = "host-3", host_name = "worker-3", cluster_name = "", status = "ready", zone = "us-south-3" },
+      ]
+    }
+  }
+
+  override_data {
+    target = data.ibm_is_instances.satellite_worker[0]
+    values = {
+      instances = [
+        { id = "worker-2", name = "worker-2", zone = "us-south-2" },
+        { id = "worker-3", name = "worker-3", zone = "us-south-3" },
+        { id = "worker-1", name = "worker-1", zone = "us-south-1" },
+      ]
+    }
+  }
+
+  assert {
+    condition     = length(ibm_is_vpc.satellite) == 0 && length(ibm_is_subnet.satellite) == 0 && length(ibm_is_public_gateway.satellite) == 0 && length(ibm_is_subnet_public_gateway_attachment.satellite) == 0 && length(ibm_is_ssh_key.satellite) == 0 && length(ibm_satellite_location.satellite) == 0 && length(data.ibm_is_image.satellite_host) == 0 && length(data.ibm_satellite_attach_host_script.satellite_worker) == 0 && length(ibm_is_instance.satellite_worker) == 0 && length(ibm_satellite_host.satellite_worker) == 3
+    error_message = "Reused workers must not create or discover VPC, image, key, or VSI infrastructure."
+  }
+
+  assert {
+    condition     = ibm_satellite_host.satellite_worker[0].host_id == "host-1" && ibm_satellite_host.satellite_worker[0].zone == "us-south-1" && ibm_satellite_host.satellite_worker[1].host_id == "host-2" && ibm_satellite_host.satellite_worker[1].zone == "us-south-2" && ibm_satellite_host.satellite_worker[2].host_id == "host-3" && ibm_satellite_host.satellite_worker[2].zone == "us-south-3"
+    error_message = "Reused workers must be assigned by their reported IDs and zones, not input position."
+  }
+}
+
+run "satellite_reused_worker_requires_ready_unassigned_location_host" {
+  command = plan
+
+  variables {
+    cluster_name                      = "synthetic-satellite"
+    resource_group_name               = "fixture-resource-group"
+    region                            = "us-south"
+    cluster_mode                      = "satellite"
+    platform                          = "openshift"
+    kube_version                      = "4.17_openshift"
+    worker_count                      = 1
+    satellite_zones                   = ["us-south-1", "us-south-2", "us-south-3"]
+    satellite_location_id             = "location-existing"
+    satellite_worker_instance_ids     = ["worker-1"]
+    satellite_worker_operating_system = "RHCOS"
+  }
+
+  override_data {
+    target = data.ibm_satellite_location.satellite[0]
+    values = {
+      id                  = "location-existing"
+      host_attached_count = 3
+      zones               = ["us-south-1", "us-south-2", "us-south-3"]
+      hosts               = [{ host_id = "host-1", host_name = "worker-1", cluster_name = "other-cluster", status = "ready", zone = "us-south-1" }]
+    }
+  }
+
+  override_data {
+    target = data.ibm_is_instances.satellite_worker[0]
+    values = { instances = [{ id = "worker-1", name = "worker-1", zone = "us-south-1" }] }
+  }
+
+  expect_failures = [ibm_satellite_cluster.satellite]
+}
+
 run "satellite_reused_location_without_three_attached_hosts_fails_plan" {
   command = plan
 

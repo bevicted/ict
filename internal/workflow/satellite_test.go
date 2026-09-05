@@ -290,6 +290,72 @@ func TestSatelliteReusePersistsOwnershipWithoutPublicKey(t *testing.T) {
 	}
 }
 
+func TestSatelliteWorkerReuseValidationPersistenceAndRecovery(t *testing.T) {
+	for name, test := range map[string]struct {
+		mutate func(*Inputs)
+		want   string
+	}{
+		"requires location":           {mutate: func(in *Inputs) { in.SatelliteLocationID = "" }, want: "requires satellite-location-id"},
+		"requires worker cardinality": {mutate: func(in *Inputs) { in.WorkerCount, in.SatelliteWorkerInstanceIDs = 3, []string{"worker-1"} }, want: "exactly 3"},
+		"rejects duplicates":          {mutate: func(in *Inputs) { in.SatelliteWorkerInstanceIDs = []string{"worker-1", "worker-1"} }, want: "duplicate satellite-worker-instance-id"},
+		"rejects unused networking":   {mutate: func(in *Inputs) { in.VPCID = "vpc-existing" }, want: "networking inputs"},
+		"rejects unused SSH key":      {mutate: func(in *Inputs) { in.SatelliteSSHKeyID = "key-existing" }, want: "SSH key inputs"},
+		"rejects other providers": {mutate: func(in *Inputs) {
+			in.Provider = "vpc-gen2"
+			in.Platform, in.Version, in.Zone, in.Flavor, in.Name = "kubernetes", "1.31", "us-south-1", "bx2.2x8", "fixture-cluster"
+		}, want: "only supported by the satellite provider"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs := configuredSatelliteInputs(t)
+			inputs.SatelliteManagedFrom, inputs.SatelliteHostImage, inputs.SatelliteSSHPublicKeyPath = "", "", ""
+			inputs.SatelliteLocationID = "location-existing"
+			inputs.SatelliteWorkerInstanceIDs = []string{"worker-1"}
+			test.mutate(&inputs)
+			cfg, err := config.Load(inputs.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := newRunner(t.TempDir(), &fakeTerraform{}).resolve(context.Background(), cfg, inputs); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Satellite worker reuse validation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	workspace := t.TempDir()
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	inputs := configuredSatelliteInputs(t)
+	inputs.SatelliteManagedFrom, inputs.SatelliteHostImage, inputs.SatelliteSSHPublicKeyPath = "", "", ""
+	inputs.SatelliteLocationID = " location-existing "
+	inputs.SatelliteWorkerInstanceIDs = []string{" worker-1 "}
+	if err := runner.Plan(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{ictterraform.TFVarsName, ictterraform.ContextName} {
+		contents, err := os.ReadFile(filepath.Join(workspace, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(contents), "worker-1") || strings.Contains(string(contents), "satellite_host_image") || strings.Contains(string(contents), "ssh-ed25519") {
+			t.Fatalf("%s does not persist only reused-worker ownership: %s", path, contents)
+		}
+	}
+	writeTerraformState(t, workspace)
+	fake.resources = true
+	changed := inputs
+	changed.SatelliteWorkerInstanceIDs = []string{"worker-other"}
+	fake.calls = nil
+	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
+		t.Fatalf("changed Satellite worker create error = %v", err)
+	}
+	if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "init, state list" {
+		t.Fatalf("changed Satellite worker actions = %q", got)
+	}
+	if err := runner.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSatelliteTerraformTopology(t *testing.T) {
 	asset, err := os.ReadFile(filepath.Join("..", "terraform", "assets", "main.tf"))
 	if err != nil {
@@ -303,8 +369,10 @@ func TestSatelliteTerraformTopology(t *testing.T) {
 		"data \"ibm_is_ssh_key\" \"satellite\"",
 		"effective_satellite_subnet_id_by_zone",
 		"effective_satellite_gateway_id_by_zone",
+		"data \"ibm_is_instances\" \"satellite_worker\"",
+		"satellite_worker_instance_ids",
 		"ibm_is_instance\" \"satellite_worker\"",
-		"count = var.cluster_mode == \"satellite\" ? var.worker_count : 0",
+		"count = local.satellite_managed_infrastructure_needed ? var.worker_count : 0",
 		"satellite-role:control-plane",
 		"satellite-role:cluster-worker",
 		"worker_pool   = \"default\"",

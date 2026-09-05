@@ -155,9 +155,9 @@ ICT_SUBNET_IDS=subnet-existing ict plan --provider vpc-gen2 --platform kubernete
 
 Satellite accepts the same VPC, subnet, and public-gateway IDs. Supply either no IDs or exactly three unordered subnet IDs and exactly three unordered gateway IDs. ICT reads their provider-reported zones and requires one matching subnet and gateway in every explicit `--satellite-zone`; it never relies on input order. Supplied objects are data sources and survive `destroy`. Existing subnet-gateway attachments remain external. ICT creates and later removes only an attachment it needs for an unattached subnet.
 
-Use `--satellite-location-id` (`ICT_SATELLITE_LOCATION_ID`) for a location that already has its control plane. It must have at least three attached hosts and cover all requested zones. ICT reads it, creates no location or control-plane VSIs or assignments, and still creates and registers the managed worker VSIs for the new cluster. The IBM provider waits for the location to become `normal` during `apply`, or fails before issuing the cluster-create request; the location data source does not expose that state, so `plan` cannot validate it independently. In this mode omit `--satellite-managed-from`; it is required only when ICT creates a location.
+Use `--satellite-location-id` (`ICT_SATELLITE_LOCATION_ID`) for a location that already has its control plane. It must have at least three attached hosts and cover all requested zones. ICT reads it and creates no location or control-plane VSIs or assignments. The IBM provider waits for the location to become `normal` during `apply`, or fails before issuing the cluster-create request; the location data source does not expose that state, so `plan` cannot validate it independently. In this mode omit `--satellite-managed-from`; it is required only when ICT creates a location.
 
-For the managed VSIs, use either `--satellite-ssh-key-id` (`ICT_SATELLITE_SSH_KEY_ID`) or `--satellite-ssh-public-key`, not both. A key ID is read by ID and is never managed. Image, profile, and one key input remain required because this release still creates Satellite worker VSIs. All supplied IDs and ownership choices are saved in the private Terraform values and recovery context, so a later `destroy` preserves externally owned VPC networking, keys, locations, and attachments.
+For ICT-managed worker VSIs, use either `--satellite-ssh-key-id` (`ICT_SATELLITE_SSH_KEY_ID`) or `--satellite-ssh-public-key`, not both. A key ID is read by ID and is never managed. Image, profile, and one key input are required only when ICT creates worker VSIs. All supplied IDs and ownership choices are saved in the private Terraform values and recovery context, so a later `destroy` preserves externally owned VPC networking, keys, locations, and VSIs.
 
 Example complete reuse with managed workers:
 
@@ -171,11 +171,28 @@ ict plan --provider satellite --platform openshift --version 4.17 \
   --satellite-ssh-key-id key-existing --name example-satellite
 ```
 
+### Reuse Satellite worker VSIs
+
+For an existing worker group, repeat `--satellite-worker-instance-id` (`ICT_SATELLITE_WORKER_INSTANCE_IDS`, comma-separated) exactly once for every `--worker-count`. IDs are unordered: ICT reads the plural VSI inventory, resolves every ID exactly once, and uses each VSI's reported zone rather than the argument position. The IDs require `--satellite-location-id`; every VSI must already be registered in that location as an unassigned `ready` host. ICT creates the cluster and manages one `ibm_satellite_host` assignment per supplied VSI. Destroy removes those assignments, but does not manage or delete the location or VSIs.
+
+A reused worker group has no VPC, subnet, gateway, SSH key, image, profile, or attach-script consumer. Omit those creation inputs; ICT rejects supplied networking, image, profile, and SSH-key inputs rather than silently ignoring them. Explicit `--satellite-zone` values and the worker operating system remain required for cluster topology. This fully reused plan creates only the cluster and its worker assignments:
+
+```sh
+ict plan --provider satellite --platform openshift --version 4.17 \
+  --resource-group example-resource-group --worker-count 3 \
+  --satellite-zone us-south-1 --satellite-zone us-south-2 --satellite-zone us-south-3 \
+  --satellite-location-id location-existing \
+  --satellite-worker-instance-id worker-vsi-3 \
+  --satellite-worker-instance-id worker-vsi-1 \
+  --satellite-worker-instance-id worker-vsi-2 \
+  --name example-satellite
+```
+
 Provider-specific inputs are:
 
 - VPC Gen 2: `--zone` and `--flavor`. The region is derived from the zone.
 - Classic: `--datacenter`, `--machine-type`, `--public-vlan-id`, and `--private-vlan-id`. Both VLAN IDs must name existing numeric VLANs. ICT does not create or manage Classic VLANs. Classic commands also require `IAAS_CLASSIC_USERNAME` and `IAAS_CLASSIC_API_KEY` in the environment.
-- Satellite: repeat `--satellite-zone` exactly three times in one region. New locations require `--satellite-managed-from`; reused locations use `--satellite-location-id` instead. Provide `--satellite-host-image` and either `--satellite-ssh-key-id` or `--satellite-ssh-public-key`. Satellite requires OpenShift. `--satellite-host-profile` defaults to `bx2-4x16`, and `--satellite-worker-operating-system` defaults to `RHCOS`.
+- Satellite: repeat `--satellite-zone` exactly three times in one region. New locations require `--satellite-managed-from`; reused locations use `--satellite-location-id` instead. Managed worker VSIs require `--satellite-host-image` and either `--satellite-ssh-key-id` or `--satellite-ssh-public-key`; existing worker IDs replace all of those inputs. Satellite requires OpenShift. `--satellite-host-profile` defaults to `bx2-4x16` only for managed VSIs, and `--satellite-worker-operating-system` defaults to `RHCOS`.
 
 `--worker-count` defaults to 1 for Kubernetes and 2 for OpenShift. Satellite is the exception and accepts only 1 or 3 workers. Satellite creates a location, three control-plane hosts, and worker hosts, so it can incur substantial VPC, compute, and Satellite costs. Confirm all selected zones, image, profile, capacity, and pricing before `create`.
 
