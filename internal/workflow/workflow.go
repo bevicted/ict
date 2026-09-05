@@ -943,7 +943,6 @@ func normalizeSatelliteReuseInputs(in *Inputs, provider config.Provider) error {
 	if err != nil {
 		return err
 	}
-	sort.Strings(workerIDs)
 	if locationID != "" && strings.TrimSpace(in.SatelliteManagedFrom) != "" {
 		return errors.New("satellite-managed-from cannot be used with satellite-location-id")
 	}
@@ -995,6 +994,7 @@ func normalizeIDList(name string, values []string) ([]string, error) {
 		seen[id] = struct{}{}
 		normalized = append(normalized, id)
 	}
+	sort.Strings(normalized)
 	return normalized, nil
 }
 
@@ -1004,6 +1004,20 @@ func validVPCReuseValues(values Values) bool {
 		return false
 	}
 	return inputs.VPCID == values.VPCID && slices.Equal(inputs.SubnetIDs, values.SubnetIDs) && slices.Equal(inputs.PublicGatewayIDs, values.PublicGatewayIDs)
+}
+
+func canonicalizeSatelliteRecoveryNetworking(values *Values) error {
+	if values.ClusterMode != "satellite" {
+		return nil
+	}
+	inputs := Inputs{VPCID: values.VPCID, SubnetIDs: values.SubnetIDs, PublicGatewayIDs: values.PublicGatewayIDs}
+	if err := normalizeVPCReuseInputs(&inputs, config.ProviderSatellite); err != nil {
+		return err
+	}
+	values.VPCID = inputs.VPCID
+	values.SubnetIDs = inputs.SubnetIDs
+	values.PublicGatewayIDs = inputs.PublicGatewayIDs
+	return nil
 }
 
 func validSatelliteReuseValues(values Values) bool {
@@ -1159,6 +1173,9 @@ func readRecovery(path string) (RecoveryContext, error) {
 	if err := json.Unmarshal(data, &recovery); err != nil || recovery.Version != 1 || recovery.Target == "" {
 		return RecoveryContext{}, errors.New("invalid saved context")
 	}
+	if err := canonicalizeSatelliteRecoveryNetworking(&recovery.Values); err != nil {
+		return RecoveryContext{}, errors.New("invalid saved context")
+	}
 	if err := validateRecoveryForDestroy(recovery); err != nil {
 		return RecoveryContext{}, err
 	}
@@ -1256,7 +1273,13 @@ func savedInputsMatch(tfvarsPath, contextPath string, expected RecoveryContext) 
 		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
 	}
 	actualValues, err = recoveryValuesFromTFVars(actualValues, actual.SatelliteSSHPublicKeyFingerprint)
-	if err != nil || !reflect.DeepEqual(actualValues, expected.Values) || !reflect.DeepEqual(actual, expected) {
+	if err != nil || !reflect.DeepEqual(actualValues, expected.Values) {
+		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
+	}
+	// The saved digest binds the original tfvars bytes. Ignore its value when
+	// comparing otherwise canonical recovery metadata from older releases.
+	actual.TFVarsSHA256 = expected.TFVarsSHA256
+	if !reflect.DeepEqual(actual, expected) {
 		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
 	}
 	return nil
@@ -1276,6 +1299,9 @@ func decodeValues(data []byte) (Values, error) {
 }
 
 func recoveryValuesFromTFVars(values Values, fingerprint string) (Values, error) {
+	if err := canonicalizeSatelliteRecoveryNetworking(&values); err != nil {
+		return Values{}, errors.New("invalid Satellite recovery values")
+	}
 	if values.ClusterMode == "satellite" {
 		if len(values.SatelliteWorkerInstanceIDs) > 0 {
 			if values.SatelliteSSHPublicKey != "" || fingerprint != "" {

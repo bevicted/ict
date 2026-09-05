@@ -279,6 +279,13 @@ func TestSatelliteReusePersistsOwnershipWithoutPublicKey(t *testing.T) {
 	}
 	writeTerraformState(t, workspace)
 	fake.resources = true
+	reordered := inputs
+	reordered.SubnetIDs = []string{"subnet-1", "subnet-2", "subnet-3"}
+	reordered.PublicGatewayIDs = []string{"gateway-1", "gateway-2", "gateway-3"}
+	fake.calls = nil
+	if err := runner.Create(context.Background(), reordered); err != nil {
+		t.Fatalf("reordered Satellite networking create error = %v", err)
+	}
 	changed := inputs
 	changed.SatelliteLocationID = "location-other"
 	fake.calls = nil
@@ -287,6 +294,82 @@ func TestSatelliteReusePersistsOwnershipWithoutPublicKey(t *testing.T) {
 	}
 	if err := runner.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSatelliteDestroyAcceptsLegacyUnorderedNetworking(t *testing.T) {
+	workspace := t.TempDir()
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	inputs := configuredSatelliteInputs(t)
+	inputs.SatelliteManagedFrom = ""
+	inputs.SatelliteLocationID = "location-existing"
+	inputs.SatelliteSSHPublicKeyPath = ""
+	inputs.SatelliteSSHKeyID = "key-existing"
+	inputs.VPCID = "vpc-existing"
+	inputs.SubnetIDs = []string{"subnet-1", "subnet-2", "subnet-3"}
+	inputs.PublicGatewayIDs = []string{"gateway-1", "gateway-2", "gateway-3"}
+	if err := runner.Plan(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+
+	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
+	contextPath := filepath.Join(workspace, ictterraform.ContextName)
+	tfvars, err := os.ReadFile(tfvarsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyValues, err := decodeValues(tfvars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyValues.SubnetIDs = []string{"subnet-3", "subnet-1", "subnet-2"}
+	legacyValues.PublicGatewayIDs = []string{"gateway-2", "gateway-3", "gateway-1"}
+	legacyTFVars, err := marshalJSON(legacyValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tfvarsPath, legacyTFVars, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	contextData, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovery RecoveryContext
+	if err := json.Unmarshal(contextData, &recovery); err != nil {
+		t.Fatal(err)
+	}
+	recovery.Values.SubnetIDs = legacyValues.SubnetIDs
+	recovery.Values.PublicGatewayIDs = legacyValues.PublicGatewayIDs
+	recovery.TFVarsSHA256 = tfvarsSHA256(legacyTFVars)
+	contextData, err = json.Marshal(recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contextPath, contextData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTerraformState(t, workspace)
+	fake.resources = true
+	fake.calls = nil
+	if err := runner.Create(context.Background(), inputs); err != nil {
+		t.Fatalf("create with legacy unordered Satellite networking = %v", err)
+	}
+	changed := inputs
+	changed.SubnetIDs = []string{"subnet-1", "subnet-2", "subnet-other"}
+	fake.calls = nil
+	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
+		t.Fatalf("changed legacy Satellite networking create error = %v", err)
+	}
+	fake.calls = nil
+	if err := runner.Destroy(context.Background()); err != nil {
+		t.Fatalf("destroy with legacy unordered Satellite networking = %v", err)
+	}
+	if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "state list, init, destroy" {
+		t.Fatalf("legacy Satellite networking destroy actions = %q", got)
 	}
 }
 
@@ -327,7 +410,8 @@ func TestSatelliteWorkerReuseValidationPersistenceAndRecovery(t *testing.T) {
 	inputs := configuredSatelliteInputs(t)
 	inputs.SatelliteManagedFrom, inputs.SatelliteHostImage, inputs.SatelliteSSHPublicKeyPath = "", "", ""
 	inputs.SatelliteLocationID = " location-existing "
-	inputs.SatelliteWorkerInstanceIDs = []string{" worker-1 "}
+	inputs.WorkerCount = 3
+	inputs.SatelliteWorkerInstanceIDs = []string{" worker-3 ", " worker-1 ", " worker-2 "}
 	if err := runner.Plan(context.Background(), inputs); err != nil {
 		t.Fatal(err)
 	}
@@ -342,8 +426,14 @@ func TestSatelliteWorkerReuseValidationPersistenceAndRecovery(t *testing.T) {
 	}
 	writeTerraformState(t, workspace)
 	fake.resources = true
+	reordered := inputs
+	reordered.SatelliteWorkerInstanceIDs = []string{"worker-1", "worker-2", "worker-3"}
+	fake.calls = nil
+	if err := runner.Create(context.Background(), reordered); err != nil {
+		t.Fatalf("reordered Satellite worker create error = %v", err)
+	}
 	changed := inputs
-	changed.SatelliteWorkerInstanceIDs = []string{"worker-other"}
+	changed.SatelliteWorkerInstanceIDs = []string{"worker-1", "worker-2", "worker-other"}
 	fake.calls = nil
 	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
 		t.Fatalf("changed Satellite worker create error = %v", err)
