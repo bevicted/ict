@@ -203,7 +203,7 @@ func (r Runner) workspace() (string, error) {
 	if r.Workspace != "" {
 		return r.Workspace, nil
 	}
-	return ictterraform.Workspace()
+	return ictterraform.Workspace(ictterraform.DefaultStateID)
 }
 
 func (r Runner) terraform() CommandRunner {

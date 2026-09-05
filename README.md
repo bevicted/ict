@@ -109,7 +109,7 @@ When standard input is not a terminal, `config edit` reads the complete input an
 
 ## Lifecycle
 
-Use `plan` to review Terraform changes, `create` to apply them, and `destroy` only to destroy the saved active cluster. `create` and `destroy` use Terraform auto-approval, so review a plan first.
+Use `plan` to review Terraform changes, `create` to apply them, and `destroy` only to destroy the saved active cluster. Each lifecycle action selects its state workspace with `--state-id ID` or `ICT_STATE_ID`; an action without either uses `default`. `create` and `destroy` use Terraform auto-approval, so review a plan first.
 
 A fully specified VPC Gen 2 plan looks like this:
 
@@ -126,7 +126,7 @@ ict plan \
   --name example-cluster
 ```
 
-The same inputs work with `create`. If `--name` is omitted, ICT generates a name from `--owner` (or `USER`) plus a timestamp and random suffix. All options can also be supplied through their matching `ICT_*` environment variable shown by `ict plan --help`.
+The same inputs work with `create`. If `--name` is omitted, ICT generates a name from `--owner` (or `USER`) plus a timestamp and random suffix. All lifecycle options, including `--state-id`, can also be supplied through their matching `ICT_*` environment variable shown by `ict plan --help`.
 
 ### Reuse VPC Gen 2 networking
 
@@ -202,10 +202,10 @@ When target, provider, or any required provider input is omitted, ICT may use IB
 ict destroy
 ```
 
-`destroy` accepts no replacement cluster inputs. It uses only the saved recovery context and values, refuses an empty state, and refuses plan/create inputs that do not match an existing managed state. Keep the state workspace and its private files available until the cluster is safely destroyed.
+`destroy` accepts no replacement cluster inputs other than `--state-id` (`ICT_STATE_ID`). It uses only the selected workspace's saved recovery context and values, refuses an empty state, and refuses plan/create inputs that do not match an existing managed state. Keep the state workspace and its private files available until the cluster is safely destroyed.
 
 ## State, recovery, and upgrades
 
-ICT has one active Terraform workspace at `${XDG_STATE_HOME:-~/.local/state}/ict/terraform`. It holds Terraform state, provider runtime data, generated values, and recovery context with private permissions. Do not add it to source control, copy it into issue reports, or delete it while resources may exist. ICT does not automatically import legacy workspaces; preserve any old recovery material as data and establish a complete current recovery context before attempting a destructive action.
+Each lifecycle action uses `${XDG_STATE_HOME:-~/.local/state}/ict/ID`, where `ID` is the action's `--state-id` or `ICT_STATE_ID` and defaults to literal `default`. IDs are case-sensitive ASCII strings matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`; invalid, empty, path-like, hidden, Unicode, and overlength IDs are rejected. Different IDs are sibling workspaces, for example `.../ict/default` and `.../ict/slack-user-42`. A workspace holds Terraform state, provider runtime data, generated values, and recovery context with private permissions. Do not add it to source control, copy it into issue reports, or delete it while resources may exist. ICT does not automatically import legacy workspaces; preserve any old recovery material as data and establish a complete current recovery context before attempting a destructive action.
 
 Each ICT binary materializes its embedded Terraform files into that workspace. A newer binary can therefore change the Terraform configuration applied to existing state. After every upgrade, run and review `ict plan` before `create`; do not assume an upgrade is behaviorally neutral.

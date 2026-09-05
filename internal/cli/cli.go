@@ -6,6 +6,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/bevicted/ict/internal/config"
+	ictterraform "github.com/bevicted/ict/internal/terraform"
 	"github.com/bevicted/ict/internal/workflow"
 )
 
@@ -19,6 +20,7 @@ type CLI struct {
 
 // VPCCommand contains the transient inputs shared by plan and create.
 type VPCCommand struct {
+	StateID                        string   `name:"state-id" help:"Terraform state workspace identifier." env:"ICT_STATE_ID" default:"default"`
 	Config                         string   `help:"Target configuration file." env:"ICT_CONFIG"`
 	Target                         string   `help:"Configured target name." env:"ICT_TARGET"`
 	Provider                       string   `help:"Cluster provider (vpc-gen2, classic, or satellite)." env:"ICT_PROVIDER"`
@@ -49,7 +51,9 @@ type VPCCommand struct {
 }
 
 // Destroy deliberately accepts no replacement cluster inputs.
-type Destroy struct{}
+type Destroy struct {
+	StateID string `name:"state-id" help:"Terraform state workspace identifier." env:"ICT_STATE_ID" default:"default"`
+}
 
 // ConfigCommand contains configuration inspection and mutation commands.
 type ConfigCommand struct {
@@ -108,11 +112,23 @@ func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 	switch parsed.Command() {
 	case "plan":
-		return r.Workflow.Plan(ctx, command.Plan.inputs())
+		runner, err := r.lifecycle(command.Plan.StateID)
+		if err != nil {
+			return err
+		}
+		return runner.Plan(ctx, command.Plan.inputs())
 	case "create":
-		return r.Workflow.Create(ctx, command.Create.inputs())
+		runner, err := r.lifecycle(command.Create.StateID)
+		if err != nil {
+			return err
+		}
+		return runner.Create(ctx, command.Create.inputs())
 	case "destroy":
-		return r.Workflow.Destroy(ctx)
+		runner, err := r.lifecycle(command.Destroy.StateID)
+		if err != nil {
+			return err
+		}
+		return runner.Destroy(ctx)
 	case "config show":
 		return r.Config.Show(command.Config.Show.Config)
 	case "config get <path>":
@@ -124,6 +140,16 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 	default:
 		return nil
 	}
+}
+
+func (r Runner) lifecycle(stateID string) (workflow.Runner, error) {
+	workspace, err := ictterraform.Workspace(stateID)
+	if err != nil {
+		return workflow.Runner{}, err
+	}
+	runner := r.Workflow
+	runner.Workspace = workspace
+	return runner, nil
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bevicted/ict/internal/config"
+	"github.com/bevicted/ict/internal/workflow"
 )
 
 func TestKongParsesICTEnvironment(t *testing.T) {
@@ -85,6 +86,143 @@ func TestKongParsesSatelliteInputs(t *testing.T) {
 	}
 	if parsed.Command() != "plan" || command.Plan.Provider != "satellite" || len(command.Plan.SatelliteZones) != 3 || command.Plan.SatelliteLocationID != "location-existing" || command.Plan.SatelliteSSHKeyID != "key-existing" || strings.Join(command.Plan.SatelliteWorkerInstanceIDs, ",") != "worker-1" || strings.Join(command.Plan.SubnetIDs, ",") != "subnet-3,subnet-1,subnet-2" || strings.Join(command.Plan.PublicGatewayIDs, ",") != "gateway-2,gateway-3,gateway-1" {
 		t.Fatalf("parsed Satellite command = %q, plan = %#v", parsed.Command(), command.Plan)
+	}
+}
+
+func TestKongParsesLifecycleStateID(t *testing.T) {
+	for _, commandName := range []string{"plan", "create", "destroy"} {
+		t.Run(commandName, func(t *testing.T) {
+			t.Setenv("ICT_STATE_ID", "from-environment")
+			_, command, err := Parse([]string{commandName, "--state-id", "from-flag"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stateID string
+			switch commandName {
+			case "plan":
+				stateID = command.Plan.StateID
+			case "create":
+				stateID = command.Create.StateID
+			case "destroy":
+				stateID = command.Destroy.StateID
+			}
+			if stateID != "from-flag" {
+				t.Fatalf("state ID = %q, want flag value", stateID)
+			}
+			_, command, err = Parse([]string{commandName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch commandName {
+			case "plan":
+				stateID = command.Plan.StateID
+			case "create":
+				stateID = command.Create.StateID
+			case "destroy":
+				stateID = command.Destroy.StateID
+			}
+			if stateID != "from-environment" {
+				t.Fatalf("state ID = %q, want environment value", stateID)
+			}
+		})
+	}
+}
+
+func TestKongDefaultsLifecycleStateID(t *testing.T) {
+	previous, set := os.LookupEnv("ICT_STATE_ID")
+	if err := os.Unsetenv("ICT_STATE_ID"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if set {
+			_ = os.Setenv("ICT_STATE_ID", previous)
+		}
+	})
+	for _, commandName := range []string{"plan", "create", "destroy"} {
+		t.Run(commandName, func(t *testing.T) {
+			_, command, err := Parse([]string{commandName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stateID string
+			switch commandName {
+			case "plan":
+				stateID = command.Plan.StateID
+			case "create":
+				stateID = command.Create.StateID
+			case "destroy":
+				stateID = command.Destroy.StateID
+			}
+			if stateID != "default" {
+				t.Fatalf("state ID = %q, want default", stateID)
+			}
+		})
+	}
+}
+
+func TestLifecycleRejectsEmptyStateID(t *testing.T) {
+	for _, args := range [][]string{
+		{"plan", "--state-id="},
+		{"plan"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if len(args) == 1 {
+				t.Setenv("ICT_STATE_ID", "")
+			}
+			parsed, command, err := Parse(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Run(context.Background(), parsed, command); err == nil || !strings.Contains(err.Error(), "invalid state ID") {
+				t.Fatalf("Run error = %v, want invalid state ID", err)
+			}
+		})
+	}
+}
+
+func TestStateIDIsLifecycleScoped(t *testing.T) {
+	for _, args := range [][]string{
+		{"--state-id", "one", "plan"},
+		{"config", "show", "--state-id", "one"},
+	} {
+		if _, _, err := Parse(args); err == nil {
+			t.Fatalf("Parse(%q) accepted a non-lifecycle state ID", args)
+		}
+	}
+}
+
+func TestLifecycleWorkspaceSelection(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	original := workflow.Runner{Workspace: "injected-workspace"}
+	runner, err := (Runner{Workflow: original}).lifecycle("selected-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(stateHome, "ict", "selected-state")
+	if runner.Workspace != want {
+		t.Fatalf("workspace = %q, want %q", runner.Workspace, want)
+	}
+	if original.Workspace != "injected-workspace" {
+		t.Fatalf("original runner workspace = %q", original.Workspace)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "ict")); !os.IsNotExist(err) {
+		t.Fatalf("workspace selection created the state root: %v", err)
+	}
+}
+
+func TestLifecycleRejectsInvalidStateIDBeforeWorkflow(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	parsed, command, err := Parse([]string{"plan", "--state-id", "../outside"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), parsed, command); err == nil || !strings.Contains(err.Error(), "invalid state ID") {
+		t.Fatalf("Run error = %v, want invalid state ID", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "ict")); !os.IsNotExist(err) {
+		t.Fatalf("invalid state ID created the state root: %v", err)
 	}
 }
 

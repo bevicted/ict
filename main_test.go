@@ -32,7 +32,7 @@ func TestPrintParseUsageForMissingCommand(t *testing.T) {
 		"Usage: ict <command>",
 		"plan [flags]",
 		"create [flags]",
-		"destroy",
+		"destroy [flags]",
 		"config show [flags]",
 		"config get <path> [flags]",
 		"config set <path> <yaml-value> [flags]",

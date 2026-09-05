@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 )
 
 //go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl assets/cluster-name.tftest.hcl assets/satellite-topology.tftest.hcl assets/vpc-reuse.tftest.hcl
@@ -17,8 +18,12 @@ const (
 	ContextName = ".cluster/context.json"
 )
 
-// Workspace returns the one active Terraform workspace for the current user.
-func Workspace() (string, error) {
+const DefaultStateID = "default"
+
+var stateIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// StateRoot returns the directory containing ICT state workspaces.
+func StateRoot() (string, error) {
 	stateHome := os.Getenv("XDG_STATE_HOME")
 	if stateHome == "" {
 		home, err := os.UserHomeDir()
@@ -27,7 +32,19 @@ func Workspace() (string, error) {
 		}
 		stateHome = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(stateHome, "ict", "terraform"), nil
+	return filepath.Join(stateHome, "ict"), nil
+}
+
+// Workspace returns the selected Terraform workspace without creating it.
+func Workspace(stateID string) (string, error) {
+	if !stateIDPattern.MatchString(stateID) {
+		return "", fmt.Errorf("invalid state ID %q: must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}", stateID)
+	}
+	root, err := StateRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, stateID), nil
 }
 
 // Materialize writes the canonical Terraform files without altering state files.
