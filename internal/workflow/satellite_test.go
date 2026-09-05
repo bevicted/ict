@@ -63,6 +63,9 @@ func TestSatelliteLifecyclePersistsWithoutPublicKeyLeak(t *testing.T) {
 	if got := strings.Join(fake.calls[len(fake.calls)-1], " "); !strings.Contains(got, "destroy -input=false -auto-approve") {
 		t.Fatalf("Satellite destroy did not run: %q", got)
 	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Satellite destroy left workspace: %v", err)
+	}
 }
 
 func TestSatelliteDestroyRejectsModifiedSSHPublicKey(t *testing.T) {

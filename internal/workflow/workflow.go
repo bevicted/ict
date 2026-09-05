@@ -158,15 +158,17 @@ func terraformCommand(ctx context.Context, environ []string, command string, arg
 
 // Runner wires filesystem and subprocess dependencies for a command invocation.
 type Runner struct {
-	Terraform CommandRunner
-	IBMCloud  ibmcloud.Runner
-	Workspace string
-	Environ   []string
-	Stdout    io.Writer
-	Stderr    io.Writer
-	Terminal  func() bool
-	Now       func() time.Time
-	Suffix    func() string
+	Terraform   CommandRunner
+	IBMCloud    ibmcloud.Runner
+	Workspace   string
+	Environ     []string
+	Stdout      io.Writer
+	Stderr      io.Writer
+	Terminal    func() bool
+	Now         func() time.Time
+	Suffix      func() string
+	Materialize func(workspace string) error
+	RemoveAll   func(path string) error
 }
 
 func (r Runner) baseEnvironment() []string {
@@ -204,6 +206,13 @@ func (r Runner) workspace() (string, error) {
 		return r.Workspace, nil
 	}
 	return ictterraform.Workspace(ictterraform.DefaultStateID)
+}
+
+func (r Runner) materialize(workspace string) error {
+	if r.Materialize != nil {
+		return r.Materialize(workspace)
+	}
+	return ictterraform.Materialize(workspace)
 }
 
 func (r Runner) terraform() CommandRunner {
@@ -260,7 +269,7 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 	if err != nil {
 		return err
 	}
-	if err := ictterraform.Materialize(workspace); err != nil {
+	if err := r.materialize(workspace); err != nil {
 		return err
 	}
 	environment := r.environment(target.Environment())
@@ -321,7 +330,7 @@ func (r Runner) Destroy(ctx context.Context) error {
 	if err := savedInputsMatch(tfvarsPath, contextPath, recovery); err != nil {
 		return err
 	}
-	if err := ictterraform.Materialize(workspace); err != nil {
+	if err := r.materialize(workspace); err != nil {
 		return err
 	}
 	environment := r.environment(config.ResolvedTarget{Target: config.Target{Endpoints: recovery.Endpoints}}.Environment())
@@ -340,7 +349,17 @@ func (r Runner) Destroy(ctx context.Context) error {
 	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
 		return err
 	}
-	return r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "destroy", "-input=false", "-auto-approve", "-var-file="+tfvarsPath)
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "destroy", "-input=false", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
+		return err
+	}
+	removeAll := os.RemoveAll
+	if r.RemoveAll != nil {
+		removeAll = r.RemoveAll
+	}
+	if err := removeAll(workspace); err != nil {
+		return fmt.Errorf("cleanup destroyed workspace %s: %w", workspace, err)
+	}
+	return nil
 }
 
 func (r Runner) hasState(ctx context.Context, environ []string, workspace string) (bool, error) {

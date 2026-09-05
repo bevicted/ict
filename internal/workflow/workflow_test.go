@@ -21,11 +21,12 @@ import (
 )
 
 type fakeTerraform struct {
-	resources bool
-	initErr   error
-	stateErr  error
-	calls     [][]string
-	environs  [][]string
+	resources  bool
+	initErr    error
+	stateErr   error
+	destroyErr error
+	calls      [][]string
+	environs   [][]string
 }
 
 type fakeIBMCloud struct {
@@ -80,6 +81,9 @@ func (f *fakeTerraform) run(environ []string, args ...string) ([]byte, error) {
 	f.environs = append(f.environs, append([]string(nil), environ...))
 	if len(args) >= 2 && args[1] == "init" && f.initErr != nil {
 		return nil, f.initErr
+	}
+	if len(args) >= 2 && args[1] == "destroy" && f.destroyErr != nil {
+		return nil, f.destroyErr
 	}
 	if len(args) >= 2 && args[len(args)-2] == "state" && args[len(args)-1] == "list" {
 		if f.stateErr != nil {
@@ -381,6 +385,9 @@ func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 	if got := strings.Join(fake.calls[len(fake.calls)-1], " "); !strings.Contains(got, "destroy -input=false -auto-approve") {
 		t.Fatalf("destroy did not run: %q", got)
 	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destroy left workspace: %v", err)
+	}
 }
 
 func TestVPCReuseValidationPersistenceAndRecovery(t *testing.T) {
@@ -504,6 +511,9 @@ func TestClassicLifecyclePersistsAndOmitsVPCValues(t *testing.T) {
 	}
 	if got := strings.Join(fake.calls[len(fake.calls)-1], " "); !strings.Contains(got, "destroy -input=false -auto-approve") {
 		t.Fatalf("Classic destroy did not run: %q", got)
+	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Classic destroy left workspace: %v", err)
 	}
 }
 
@@ -692,6 +702,9 @@ func TestDestroyRefusesEmptyState(t *testing.T) {
 	if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "no saved context") {
 		t.Fatalf("destroy without context = %v", err)
 	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("missing-context destroy removed workspace: %v", err)
+	}
 	if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -702,6 +715,172 @@ func TestDestroyRefusesEmptyState(t *testing.T) {
 	}
 	if len(fake.calls) != 1 || !strings.HasSuffix(strings.Join(fake.calls[0], " "), "state list") {
 		t.Fatalf("empty state destroy calls = %#v", fake.calls)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("empty-state destroy removed workspace: %v", err)
+	}
+}
+
+func TestDestroyRemovesSelectedWorkspaceAndPreservesSiblings(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "selected")
+	sibling := filepath.Join(root, "sibling")
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, ".terraform", "providers"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".terraform", "providers", "runtime"), []byte("runtime data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "keep"), []byte("sibling state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeTerraformState(t, workspace)
+	fake.resources = true
+
+	if err := runner.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destroy left selected workspace: %v", err)
+	}
+	contents, err := os.ReadFile(filepath.Join(sibling, "keep"))
+	if err != nil || string(contents) != "sibling state" {
+		t.Fatalf("destroy changed sibling workspace: %q, %v", contents, err)
+	}
+}
+
+func TestDestroyRetainsWorkspaceAfterFailure(t *testing.T) {
+	for name, configure := range map[string]func(*fakeTerraform){
+		"initialization":    func(fake *fakeTerraform) { fake.initErr = errors.New("initialization unavailable") },
+		"Terraform destroy": func(fake *fakeTerraform) { fake.destroyErr = errors.New("destroy unavailable") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			workspace := t.TempDir()
+			fake := &fakeTerraform{}
+			runner := newRunner(workspace, fake)
+			if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
+				t.Fatal(err)
+			}
+			writeTerraformState(t, workspace)
+			fake.resources = true
+			configure(fake)
+
+			if err := runner.Destroy(context.Background()); err == nil {
+				t.Fatal("destroy succeeded")
+			}
+			if _, err := os.Stat(workspace); err != nil {
+				t.Fatalf("failed destroy removed workspace: %v", err)
+			}
+		})
+	}
+
+	t.Run("materialization", func(t *testing.T) {
+		workspace := t.TempDir()
+		fake := &fakeTerraform{}
+		runner := newRunner(workspace, fake)
+		if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
+			t.Fatal(err)
+		}
+		writeTerraformState(t, workspace)
+		fake.resources = true
+		runner.Materialize = func(string) error { return errors.New("materialization unavailable") }
+
+		if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "materialization unavailable") {
+			t.Fatalf("materialization failure = %v", err)
+		}
+		if _, err := os.Stat(workspace); err != nil {
+			t.Fatalf("materialization failure removed workspace: %v", err)
+		}
+	})
+
+	t.Run("missing saved values", func(t *testing.T) {
+		workspace := t.TempDir()
+		fake := &fakeTerraform{}
+		runner := newRunner(workspace, fake)
+		if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
+			t.Fatal(err)
+		}
+		writeTerraformState(t, workspace)
+		if err := os.Remove(filepath.Join(workspace, ictterraform.TFVarsName)); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "no saved Terraform values") {
+			t.Fatalf("missing saved values failure = %v", err)
+		}
+		if _, err := os.Stat(workspace); err != nil {
+			t.Fatalf("missing saved values failure removed workspace: %v", err)
+		}
+	})
+
+	t.Run("Classic credentials", func(t *testing.T) {
+		workspace := t.TempDir()
+		fake := &fakeTerraform{}
+		runner := newRunner(workspace, fake)
+		runner.Environ = []string{"IAAS_CLASSIC_USERNAME=synthetic-user", "IAAS_CLASSIC_API_KEY=synthetic-api-key"}
+		if err := runner.Plan(context.Background(), configuredClassicInputs(t)); err != nil {
+			t.Fatal(err)
+		}
+		writeTerraformState(t, workspace)
+		fake.resources = true
+		runner.Environ = []string{"IAAS_CLASSIC_USERNAME=synthetic-user"}
+
+		if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "IAAS_CLASSIC_API_KEY") {
+			t.Fatalf("Classic credential failure = %v", err)
+		}
+		if _, err := os.Stat(workspace); err != nil {
+			t.Fatalf("Classic credential failure removed workspace: %v", err)
+		}
+	})
+
+	t.Run("state inspection", func(t *testing.T) {
+		workspace := t.TempDir()
+		fake := &fakeTerraform{}
+		runner := newRunner(workspace, fake)
+		if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
+			t.Fatal(err)
+		}
+		writeTerraformState(t, workspace)
+		fake.resources = true
+		fake.stateErr = errors.New("state unavailable")
+
+		if err := runner.Destroy(context.Background()); err == nil || !strings.Contains(err.Error(), "inspect Terraform state: state unavailable") {
+			t.Fatalf("state inspection failure = %v", err)
+		}
+		if _, err := os.Stat(workspace); err != nil {
+			t.Fatalf("state inspection failure removed workspace: %v", err)
+		}
+	})
+
+	workspace := t.TempDir()
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	if err := runner.Plan(context.Background(), configuredInputs(t)); err != nil {
+		t.Fatal(err)
+	}
+	writeTerraformState(t, workspace)
+	fake.resources = true
+	runner.RemoveAll = func(path string) error {
+		if path != workspace {
+			t.Errorf("cleanup path = %q, want %q", path, workspace)
+		}
+		return errors.New("workspace busy")
+	}
+
+	err := runner.Destroy(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cleanup destroyed workspace") || !strings.Contains(err.Error(), "workspace busy") {
+		t.Fatalf("cleanup failure = %v", err)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("cleanup failure removed workspace: %v", err)
 	}
 }
 
