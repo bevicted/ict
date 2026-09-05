@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-//go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl assets/cluster-name.tftest.hcl assets/satellite-topology.tftest.hcl
+//go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl assets/cluster-name.tftest.hcl assets/satellite-topology.tftest.hcl assets/vpc-reuse.tftest.hcl
 var assets embed.FS
 
 const (
@@ -47,6 +47,7 @@ func Materialize(workspace string) error {
 		"assets/.terraform.lock.hcl":           ".terraform.lock.hcl",
 		"assets/cluster-name.tftest.hcl":       "cluster-name.tftest.hcl",
 		"assets/satellite-topology.tftest.hcl": "satellite-topology.tftest.hcl",
+		"assets/vpc-reuse.tftest.hcl":          "vpc-reuse.tftest.hcl",
 	} {
 		contents, err := fs.ReadFile(assets, source)
 		if err != nil {

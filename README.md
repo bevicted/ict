@@ -128,6 +128,29 @@ ict plan \
 
 The same inputs work with `create`. If `--name` is omitted, ICT generates a name from `--owner` (or `USER`) plus a timestamp and random suffix. All options can also be supplied through their matching `ICT_*` environment variable shown by `ict plan --help`.
 
+### Reuse VPC Gen 2 networking
+
+VPC Gen 2 plans can reuse existing infrastructure by immutable ID: `--vpc-id` (`ICT_VPC_ID`), repeatable `--subnet-id` (`ICT_SUBNET_IDS`, comma-separated), and repeatable `--public-gateway-id` (`ICT_PUBLIC_GATEWAY_IDS`, comma-separated). VPC mode accepts at most one subnet ID and one gateway ID; IDs must be non-blank and unique. These options are not accepted for Classic or Satellite clusters.
+
+ICT reads supplied VPCs, subnets, and gateways as Terraform data sources. It never imports or destroys them. A supplied subnet or gateway infers its VPC. When an explicit VPC is also supplied, all IDs must identify resources in that VPC and supplied subnet/gateway zones must match `--zone`. An existing subnet attachment is external and remains untouched. For an unattached supplied subnet, ICT creates and later removes only the attachment it establishes.
+
+Omitted IDs create only a dependency the cluster still needs. Complete reuse creates the cluster, but no VPC, subnet, or gateway:
+
+```sh
+ict plan --provider vpc-gen2 --platform kubernetes --version 1.31 \
+  --resource-group example-resource-group --zone us-south-1 --flavor bx2.2x8 \
+  --vpc-id vpc-existing --subnet-id subnet-existing \
+  --public-gateway-id gateway-existing --name example-cluster
+```
+
+Mixed ownership is also supported. This plan reads the existing subnet, infers its VPC, and creates only a gateway and its attachment when the subnet is unattached:
+
+```sh
+ICT_SUBNET_IDS=subnet-existing ict plan --provider vpc-gen2 --platform kubernetes \
+  --version 1.31 --resource-group example-resource-group --zone us-south-1 \
+  --flavor bx2.2x8 --name example-cluster
+```
+
 Provider-specific inputs are:
 
 - VPC Gen 2: `--zone` and `--flavor`. The region is derived from the zone.

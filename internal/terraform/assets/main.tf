@@ -17,36 +17,80 @@ data "ibm_resource_group" "selected" {
   name = var.resource_group_name
 }
 
+data "ibm_is_vpc" "cluster" {
+  count = var.cluster_mode == "vpc" && var.vpc_id != null ? 1 : 0
+
+  identifier = var.vpc_id
+}
+
+data "ibm_is_subnet" "cluster" {
+  count = var.cluster_mode == "vpc" && length(coalesce(var.subnet_ids, [])) == 1 ? 1 : 0
+
+  identifier = var.subnet_ids[0]
+}
+
+data "ibm_is_public_gateways" "cluster" {
+  count = var.cluster_mode == "vpc" && length(coalesce(var.public_gateway_ids, [])) == 1 ? 1 : 0
+}
+
+locals {
+  supplied_public_gateway = var.cluster_mode == "vpc" && length(coalesce(var.public_gateway_ids, [])) == 1 ? try(one([
+    for gateway in data.ibm_is_public_gateways.cluster[0].public_gateways : gateway
+    if gateway.id == var.public_gateway_ids[0]
+  ]), null) : null
+  existing_subnet_public_gateway = var.cluster_mode == "vpc" && length(coalesce(var.subnet_ids, [])) == 1 ? data.ibm_is_subnet.cluster[0].public_gateway : ""
+  managed_public_gateway_needed = var.cluster_mode == "vpc" && length(coalesce(var.public_gateway_ids, [])) == 0 && (
+    length(coalesce(var.subnet_ids, [])) == 0 || local.existing_subnet_public_gateway == ""
+  )
+  managed_attachment_needed = var.cluster_mode == "vpc" && (
+    length(coalesce(var.subnet_ids, [])) == 0 || local.existing_subnet_public_gateway == ""
+  )
+  effective_vpc_id = var.cluster_mode == "vpc" ? (
+    var.vpc_id != null ? data.ibm_is_vpc.cluster[0].id :
+    length(coalesce(var.subnet_ids, [])) == 1 ? data.ibm_is_subnet.cluster[0].vpc :
+    length(coalesce(var.public_gateway_ids, [])) == 1 ? try(local.supplied_public_gateway.vpc, "") :
+    ibm_is_vpc.cluster[0].id
+  ) : null
+  effective_subnet_id = var.cluster_mode == "vpc" ? (
+    length(coalesce(var.subnet_ids, [])) == 1 ? data.ibm_is_subnet.cluster[0].id : ibm_is_subnet.cluster[0].id
+  ) : null
+  effective_public_gateway_id = var.cluster_mode == "vpc" ? (
+    length(coalesce(var.public_gateway_ids, [])) == 1 ? try(local.supplied_public_gateway.id, "") :
+    local.existing_subnet_public_gateway != "" ? local.existing_subnet_public_gateway :
+    ibm_is_public_gateway.cluster[0].id
+  ) : null
+}
+
 resource "ibm_is_vpc" "cluster" {
-  count = var.cluster_mode == "vpc" ? 1 : 0
+  count = var.cluster_mode == "vpc" && var.vpc_id == null && length(coalesce(var.subnet_ids, [])) == 0 && length(coalesce(var.public_gateway_ids, [])) == 0 ? 1 : 0
 
   name           = "${var.cluster_name}-vpc"
   resource_group = data.ibm_resource_group.selected.id
 }
 
 resource "ibm_is_subnet" "cluster" {
-  count = var.cluster_mode == "vpc" ? 1 : 0
+  count = var.cluster_mode == "vpc" && length(coalesce(var.subnet_ids, [])) == 0 ? 1 : 0
 
   name                     = "${var.cluster_name}-subnet"
-  vpc                      = ibm_is_vpc.cluster[0].id
+  vpc                      = local.effective_vpc_id
   zone                     = var.zone
   resource_group           = data.ibm_resource_group.selected.id
   total_ipv4_address_count = 256
 }
 
 resource "ibm_is_public_gateway" "cluster" {
-  count = var.cluster_mode == "vpc" ? 1 : 0
+  count = local.managed_public_gateway_needed ? 1 : 0
 
   name = "${var.cluster_name}-gateway"
-  vpc  = ibm_is_vpc.cluster[0].id
+  vpc  = local.effective_vpc_id
   zone = var.zone
 }
 
 resource "ibm_is_subnet_public_gateway_attachment" "cluster" {
-  count = var.cluster_mode == "vpc" ? 1 : 0
+  count = local.managed_attachment_needed ? 1 : 0
 
-  subnet         = ibm_is_subnet.cluster[0].id
-  public_gateway = ibm_is_public_gateway.cluster[0].id
+  subnet         = local.effective_subnet_id
+  public_gateway = local.effective_public_gateway_id
 }
 
 resource "ibm_container_vpc_cluster" "cluster" {
@@ -59,19 +103,54 @@ resource "ibm_container_vpc_cluster" "cluster" {
   kube_version      = var.kube_version
   flavor            = var.flavor
   worker_count      = var.worker_count
-  vpc_id            = ibm_is_vpc.cluster[0].id
+  vpc_id            = local.effective_vpc_id
   resource_group_id = data.ibm_resource_group.selected.id
   wait_till         = "OneWorkerNodeReady"
 
   zones {
     name      = var.zone
-    subnet_id = ibm_is_subnet.cluster[0].id
+    subnet_id = local.effective_subnet_id
   }
 
   lifecycle {
     precondition {
       condition     = can(regex("^[a-z][a-z0-9-]{0,31}$", var.cluster_name))
       error_message = "VPC cluster name must be 32 or fewer characters, begin with a letter, and contain only lowercase letters, digits, and hyphens."
+    }
+
+    precondition {
+      condition     = length(coalesce(var.public_gateway_ids, [])) == 0 || local.supplied_public_gateway != null
+      error_message = "The supplied public gateway ID was not found."
+    }
+
+    precondition {
+      condition     = var.vpc_id == null || length(coalesce(var.subnet_ids, [])) == 0 || data.ibm_is_vpc.cluster[0].id == data.ibm_is_subnet.cluster[0].vpc
+      error_message = "The supplied VPC and subnet must belong to the same VPC."
+    }
+
+    precondition {
+      condition     = var.vpc_id == null || length(coalesce(var.public_gateway_ids, [])) == 0 || data.ibm_is_vpc.cluster[0].id == try(local.supplied_public_gateway.vpc, "")
+      error_message = "The supplied VPC and public gateway must belong to the same VPC."
+    }
+
+    precondition {
+      condition     = length(coalesce(var.subnet_ids, [])) == 0 || length(coalesce(var.public_gateway_ids, [])) == 0 || data.ibm_is_subnet.cluster[0].vpc == try(local.supplied_public_gateway.vpc, "")
+      error_message = "The supplied subnet and public gateway must belong to the same VPC."
+    }
+
+    precondition {
+      condition     = length(coalesce(var.subnet_ids, [])) == 0 || data.ibm_is_subnet.cluster[0].zone == var.zone
+      error_message = "The supplied subnet must be in the requested zone."
+    }
+
+    precondition {
+      condition     = length(coalesce(var.public_gateway_ids, [])) == 0 || try(local.supplied_public_gateway.zone, "") == var.zone
+      error_message = "The supplied public gateway must be in the requested zone."
+    }
+
+    precondition {
+      condition     = length(coalesce(var.subnet_ids, [])) == 0 || local.existing_subnet_public_gateway == "" || local.existing_subnet_public_gateway == local.effective_public_gateway_id
+      error_message = "The supplied subnet already has a different public gateway attachment."
     }
   }
 }

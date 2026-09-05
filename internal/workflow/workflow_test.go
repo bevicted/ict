@@ -345,7 +345,7 @@ func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{filepath.Join(workspace, "main.tf"), filepath.Join(workspace, "cluster-name.tftest.hcl"), filepath.Join(workspace, "satellite-topology.tftest.hcl"), filepath.Join(workspace, ictterraform.TFVarsName), filepath.Join(workspace, ictterraform.ContextName)} {
+	for _, path := range []string{filepath.Join(workspace, "main.tf"), filepath.Join(workspace, "cluster-name.tftest.hcl"), filepath.Join(workspace, "satellite-topology.tftest.hcl"), filepath.Join(workspace, "vpc-reuse.tftest.hcl"), filepath.Join(workspace, ictterraform.TFVarsName), filepath.Join(workspace, ictterraform.ContextName)} {
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("private runtime file %s = %v, %v", path, info, err)
@@ -380,6 +380,71 @@ func TestLifecyclePersistsAndGuardsState(t *testing.T) {
 	}
 	if got := strings.Join(fake.calls[len(fake.calls)-1], " "); !strings.Contains(got, "destroy -input=false -auto-approve") {
 		t.Fatalf("destroy did not run: %q", got)
+	}
+}
+
+func TestVPCReuseValidationPersistenceAndRecovery(t *testing.T) {
+	for name, test := range map[string]struct {
+		mutate func(*Inputs)
+		want   string
+	}{
+		"multiple subnets":   {mutate: func(in *Inputs) { in.SubnetIDs = []string{"subnet-a", "subnet-b"} }, want: "at most one subnet"},
+		"duplicate gateways": {mutate: func(in *Inputs) { in.PublicGatewayIDs = []string{"gateway-a", "gateway-a"} }, want: "duplicate public-gateway-id"},
+		"blank subnet":       {mutate: func(in *Inputs) { in.SubnetIDs = []string{" "} }, want: "subnet-id must not be blank"},
+		"inapplicable": {mutate: func(in *Inputs) {
+			in.Provider = "classic"
+			in.Zone, in.Flavor = "", ""
+			in.Datacenter, in.MachineType, in.PublicVLANID, in.PrivateVLANID = "dal10", "bx2.2x8", "123", "456"
+			in.VPCID = "vpc-existing"
+		}, want: "only supported by the vpc-gen2 provider"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs := configuredInputs(t)
+			test.mutate(&inputs)
+			cfg, err := config.Load(inputs.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := newRunner(t.TempDir(), &fakeTerraform{}).resolve(context.Background(), cfg, inputs); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("VPC reuse validation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	workspace := t.TempDir()
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	inputs := configuredInputs(t)
+	inputs.VPCID = " vpc-existing "
+	inputs.SubnetIDs = []string{" subnet-existing "}
+	inputs.PublicGatewayIDs = []string{" gateway-existing "}
+	if err := runner.Plan(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{ictterraform.TFVarsName, ictterraform.ContextName} {
+		contents, err := os.ReadFile(filepath.Join(workspace, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"vpc-existing", "subnet-existing", "gateway-existing"} {
+			if !strings.Contains(string(contents), id) {
+				t.Fatalf("%s does not persist %s: %s", path, id, contents)
+			}
+		}
+	}
+	writeTerraformState(t, workspace)
+	fake.resources = true
+	changed := inputs
+	changed.VPCID = "vpc-other"
+	fake.calls = nil
+	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
+		t.Fatalf("changed VPC reuse input create error = %v", err)
+	}
+	if got := strings.Join(terraformActions(t, fake.calls), ", "); got != "init, state list" {
+		t.Fatalf("changed VPC reuse input actions = %q", got)
+	}
+	if err := runner.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -50,6 +50,9 @@ type Inputs struct {
 	ResourceGroup                  string
 	Zone                           string
 	Flavor                         string
+	VPCID                          string
+	SubnetIDs                      []string
+	PublicGatewayIDs               []string
 	Datacenter                     string
 	MachineType                    string
 	PublicVLANID                   string
@@ -76,6 +79,9 @@ type Values struct {
 	WorkerCount                    int      `json:"worker_count"`
 	Zone                           string   `json:"zone,omitempty"`
 	Flavor                         string   `json:"flavor,omitempty"`
+	VPCID                          string   `json:"vpc_id,omitempty"`
+	SubnetIDs                      []string `json:"subnet_ids,omitempty"`
+	PublicGatewayIDs               []string `json:"public_gateway_ids,omitempty"`
 	Datacenter                     string   `json:"datacenter,omitempty"`
 	MachineType                    string   `json:"machine_type,omitempty"`
 	PublicVLANID                   string   `json:"public_vlan_id,omitempty"`
@@ -368,6 +374,9 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 	if provider != config.ProviderVPCGen2 && provider != config.ProviderClassic && provider != config.ProviderSatellite {
 		return Values{}, config.ResolvedTarget{}, fmt.Errorf("provider %q is not supported by this lifecycle", supplied.Provider)
 	}
+	if err := normalizeVPCReuseInputs(&supplied, provider); err != nil {
+		return Values{}, config.ResolvedTarget{}, err
+	}
 	if provider == config.ProviderSatellite && supplied.Platform != "" && supplied.Platform != "openshift" {
 		return Values{}, config.ResolvedTarget{}, errors.New("Satellite requires the openshift platform")
 	}
@@ -428,7 +437,7 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
-		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor}, target, nil
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs)}, target, nil
 	case config.ProviderClassic:
 		if !datacenterPattern.MatchString(supplied.Datacenter) {
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid datacenter %q", supplied.Datacenter)
@@ -866,6 +875,78 @@ func selectionMissingFields(in Inputs) []string {
 	return fields
 }
 
+func normalizeVPCReuseInputs(in *Inputs, provider config.Provider) error {
+	hasReuseIDs := in.VPCID != "" || len(in.SubnetIDs) > 0 || len(in.PublicGatewayIDs) > 0
+	if provider != config.ProviderVPCGen2 {
+		if hasReuseIDs {
+			return errors.New("VPC reuse IDs are only supported by the vpc-gen2 provider")
+		}
+		return nil
+	}
+
+	vpcID, err := normalizeOptionalID("vpc ID", in.VPCID)
+	if err != nil {
+		return err
+	}
+	subnetIDs, err := normalizeIDList("subnet-id", in.SubnetIDs)
+	if err != nil {
+		return err
+	}
+	gatewayIDs, err := normalizeIDList("public-gateway-id", in.PublicGatewayIDs)
+	if err != nil {
+		return err
+	}
+	if len(subnetIDs) > 1 {
+		return errors.New("VPC mode accepts at most one subnet ID")
+	}
+	if len(gatewayIDs) > 1 {
+		return errors.New("VPC mode accepts at most one public gateway ID")
+	}
+	in.VPCID = vpcID
+	in.SubnetIDs = subnetIDs
+	in.PublicGatewayIDs = gatewayIDs
+	return nil
+}
+
+func normalizeOptionalID(name, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if value != "" && trimmed == "" {
+		return "", fmt.Errorf("%s must not be blank", name)
+	}
+	return trimmed, nil
+}
+
+func normalizeIDList(name string, values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		id, err := normalizeOptionalID(name, value)
+		if err != nil || id == "" {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%s must not be blank", name)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return nil, fmt.Errorf("duplicate %s %q", name, id)
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	return normalized, nil
+}
+
+func validVPCReuseValues(values Values) bool {
+	inputs := Inputs{VPCID: values.VPCID, SubnetIDs: values.SubnetIDs, PublicGatewayIDs: values.PublicGatewayIDs}
+	if err := normalizeVPCReuseInputs(&inputs, config.ProviderVPCGen2); err != nil {
+		return false
+	}
+	return inputs.VPCID == values.VPCID && slices.Equal(inputs.SubnetIDs, values.SubnetIDs) && slices.Equal(inputs.PublicGatewayIDs, values.PublicGatewayIDs)
+}
+
 func missingFields(in Inputs) []string {
 	fields := make([]string, 0, 7)
 	for _, field := range []struct{ name, value string }{{"platform", in.Platform}, {"version", in.Version}, {"resource-group", in.ResourceGroup}} {
@@ -1037,7 +1118,7 @@ func validateRecoveryValues(values Values, fingerprint string) (config.Provider,
 
 	switch values.ClusterMode {
 	case "vpc":
-		if !zonePattern.MatchString(values.Zone) || zoneRegion(values.Zone) != values.Region || !flavorPattern.MatchString(values.Flavor) || !vpcClusterPattern.MatchString(values.ClusterName) || fingerprint != "" || !emptyValues(values, "vpc") {
+		if !zonePattern.MatchString(values.Zone) || zoneRegion(values.Zone) != values.Region || !flavorPattern.MatchString(values.Flavor) || !vpcClusterPattern.MatchString(values.ClusterName) || !validVPCReuseValues(values) || fingerprint != "" || !emptyValues(values, "vpc") {
 			return "", errors.New("invalid recovery values")
 		}
 		return config.ProviderVPCGen2, nil
@@ -1062,9 +1143,9 @@ func emptyValues(values Values, provider string) bool {
 	case "vpc":
 		return values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteWorkerOperatingSystem == ""
 	case "classic":
-		return values.Zone == "" && values.Flavor == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteWorkerOperatingSystem == ""
+		return values.Zone == "" && values.Flavor == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteWorkerOperatingSystem == ""
 	case "satellite":
-		return values.Zone == "" && values.Flavor == "" && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
+		return values.Zone == "" && values.Flavor == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
 	default:
 		return false
 	}

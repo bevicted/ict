@@ -19,12 +19,15 @@ func TestKongParsesICTEnvironment(t *testing.T) {
 	t.Setenv("ICT_RESOURCE_GROUP", "fixture-group")
 	t.Setenv("ICT_ZONE", "us-south-1")
 	t.Setenv("ICT_FLAVOR", "bx2.2x8")
+	t.Setenv("ICT_VPC_ID", "vpc-existing")
+	t.Setenv("ICT_SUBNET_IDS", "subnet-existing")
+	t.Setenv("ICT_PUBLIC_GATEWAY_IDS", "gateway-existing")
 	t.Setenv("ICT_CONFIG", "environment-config.yaml")
 	parsed, command, err := Parse([]string{"plan", "--config", "config.yaml", "--name", "fixture-cluster"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "plan" || command.Plan.Config != "config.yaml" || command.Plan.Target != "example" || command.Plan.Provider != "vpc-gen2" || command.Plan.Zone != "us-south-1" {
+	if parsed.Command() != "plan" || command.Plan.Config != "config.yaml" || command.Plan.Target != "example" || command.Plan.Provider != "vpc-gen2" || command.Plan.Zone != "us-south-1" || command.Plan.VPCID != "vpc-existing" || strings.Join(command.Plan.SubnetIDs, ",") != "subnet-existing" || strings.Join(command.Plan.PublicGatewayIDs, ",") != "gateway-existing" {
 		t.Fatalf("parsed command = %q, plan = %#v", parsed.Command(), command.Plan)
 	}
 }
@@ -49,6 +52,16 @@ func TestKongUsesXDGConfigWhenConfigValueIsEmpty(t *testing.T) {
 				t.Fatalf("config path = %q, want %q", path, want)
 			}
 		})
+	}
+}
+
+func TestKongParsesVPCReuseInputs(t *testing.T) {
+	parsed, command, err := Parse([]string{"plan", "--config", "config.yaml", "--target", "example", "--provider", "vpc-gen2", "--platform", "kubernetes", "--version", "1.31.4", "--resource-group", "fixture-group", "--zone", "us-south-1", "--flavor", "bx2.2x8", "--vpc-id", "vpc-existing", "--subnet-id", "subnet-existing", "--public-gateway-id", "gateway-existing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Command() != "plan" || command.Plan.VPCID != "vpc-existing" || strings.Join(command.Plan.SubnetIDs, ",") != "subnet-existing" || strings.Join(command.Plan.PublicGatewayIDs, ",") != "gateway-existing" {
+		t.Fatalf("parsed VPC reuse command = %q, plan = %#v", parsed.Command(), command.Plan)
 	}
 }
 

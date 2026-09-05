@@ -75,6 +75,39 @@ variable "flavor" {
   default     = null
 }
 
+variable "vpc_id" {
+  description = "Existing VPC Gen 2 ID. Terraform reads it and never manages it."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.vpc_id == null || trimspace(var.vpc_id) != ""
+    error_message = "vpc_id must not be blank."
+  }
+}
+
+variable "subnet_ids" {
+  description = "Existing VPC Gen 2 subnet IDs. VPC mode accepts at most one."
+  type        = list(string)
+  default     = null
+
+  validation {
+    condition     = var.subnet_ids == null || (length(var.subnet_ids) <= 1 && length(distinct(var.subnet_ids)) == length(var.subnet_ids) && alltrue([for id in var.subnet_ids : trimspace(id) != ""]))
+    error_message = "subnet_ids must contain at most one distinct, non-blank ID."
+  }
+}
+
+variable "public_gateway_ids" {
+  description = "Existing VPC Gen 2 public gateway IDs. VPC mode accepts at most one."
+  type        = list(string)
+  default     = null
+
+  validation {
+    condition     = var.public_gateway_ids == null || (length(var.public_gateway_ids) <= 1 && length(distinct(var.public_gateway_ids)) == length(var.public_gateway_ids) && alltrue([for id in var.public_gateway_ids : trimspace(id) != ""]))
+    error_message = "public_gateway_ids must contain at most one distinct, non-blank ID."
+  }
+}
+
 variable "datacenter" {
   description = "Classic data center selected from the target."
   type        = string

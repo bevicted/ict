@@ -27,6 +27,9 @@ type VPCCommand struct {
 	ResourceGroup                  string   `help:"Existing resource group name." env:"ICT_RESOURCE_GROUP"`
 	Zone                           string   `help:"VPC zone." env:"ICT_ZONE"`
 	Flavor                         string   `help:"VPC worker flavor." env:"ICT_FLAVOR"`
+	VPCID                          string   `name:"vpc-id" help:"Existing VPC Gen 2 ID to reuse." env:"ICT_VPC_ID"`
+	SubnetIDs                      []string `name:"subnet-id" help:"Existing VPC Gen 2 subnet ID to reuse; VPC mode accepts one." env:"ICT_SUBNET_IDS" sep:","`
+	PublicGatewayIDs               []string `name:"public-gateway-id" help:"Existing VPC Gen 2 public gateway ID to reuse; VPC mode accepts one." env:"ICT_PUBLIC_GATEWAY_IDS" sep:","`
 	Datacenter                     string   `help:"Classic data center." env:"ICT_DATACENTER"`
 	MachineType                    string   `help:"Classic worker machine type." env:"ICT_MACHINE_TYPE"`
 	PublicVLANID                   string   `name:"public-vlan-id" help:"Existing numeric Classic public VLAN ID." env:"ICT_PUBLIC_VLAN_ID"`
@@ -121,5 +124,5 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name}
 }
