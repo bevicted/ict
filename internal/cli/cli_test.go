@@ -22,12 +22,14 @@ func TestKongParsesICTEnvironment(t *testing.T) {
 	t.Setenv("ICT_VPC_ID", "vpc-existing")
 	t.Setenv("ICT_SUBNET_IDS", "subnet-existing")
 	t.Setenv("ICT_PUBLIC_GATEWAY_IDS", "gateway-existing")
+	t.Setenv("ICT_SATELLITE_LOCATION_ID", "location-existing")
+	t.Setenv("ICT_SATELLITE_SSH_KEY_ID", "key-existing")
 	t.Setenv("ICT_CONFIG", "environment-config.yaml")
 	parsed, command, err := Parse([]string{"plan", "--config", "config.yaml", "--name", "fixture-cluster"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "plan" || command.Plan.Config != "config.yaml" || command.Plan.Target != "example" || command.Plan.Provider != "vpc-gen2" || command.Plan.Zone != "us-south-1" || command.Plan.VPCID != "vpc-existing" || strings.Join(command.Plan.SubnetIDs, ",") != "subnet-existing" || strings.Join(command.Plan.PublicGatewayIDs, ",") != "gateway-existing" {
+	if parsed.Command() != "plan" || command.Plan.Config != "config.yaml" || command.Plan.Target != "example" || command.Plan.Provider != "vpc-gen2" || command.Plan.Zone != "us-south-1" || command.Plan.VPCID != "vpc-existing" || strings.Join(command.Plan.SubnetIDs, ",") != "subnet-existing" || strings.Join(command.Plan.PublicGatewayIDs, ",") != "gateway-existing" || command.Plan.SatelliteLocationID != "location-existing" || command.Plan.SatelliteSSHKeyID != "key-existing" {
 		t.Fatalf("parsed command = %q, plan = %#v", parsed.Command(), command.Plan)
 	}
 }
@@ -76,11 +78,11 @@ func TestKongParsesClassicInputs(t *testing.T) {
 }
 
 func TestKongParsesSatelliteInputs(t *testing.T) {
-	parsed, command, err := Parse([]string{"plan", "--config", "config.yaml", "--target", "example", "--provider", "satellite", "--platform", "openshift", "--version", "4.17.3", "--resource-group", "fixture-group", "--satellite-zone", "us-south-1", "--satellite-zone", "us-south-2", "--satellite-zone", "us-south-3", "--satellite-managed-from", "us-south", "--satellite-host-image", "rhel-8-synthetic", "--satellite-ssh-public-key", "key.pub"})
+	parsed, command, err := Parse([]string{"plan", "--config", "config.yaml", "--target", "example", "--provider", "satellite", "--platform", "openshift", "--version", "4.17.3", "--resource-group", "fixture-group", "--satellite-zone", "us-south-1", "--satellite-zone", "us-south-2", "--satellite-zone", "us-south-3", "--satellite-location-id", "location-existing", "--satellite-host-image", "rhel-8-synthetic", "--satellite-ssh-key-id", "key-existing", "--subnet-id", "subnet-3", "--subnet-id", "subnet-1", "--subnet-id", "subnet-2", "--public-gateway-id", "gateway-2", "--public-gateway-id", "gateway-3", "--public-gateway-id", "gateway-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "plan" || command.Plan.Provider != "satellite" || len(command.Plan.SatelliteZones) != 3 || !strings.HasSuffix(command.Plan.SatelliteSSHPublicKeyPath, "key.pub") {
+	if parsed.Command() != "plan" || command.Plan.Provider != "satellite" || len(command.Plan.SatelliteZones) != 3 || command.Plan.SatelliteLocationID != "location-existing" || command.Plan.SatelliteSSHKeyID != "key-existing" || strings.Join(command.Plan.SubnetIDs, ",") != "subnet-3,subnet-1,subnet-2" || strings.Join(command.Plan.PublicGatewayIDs, ",") != "gateway-2,gateway-3,gateway-1" {
 		t.Fatalf("parsed Satellite command = %q, plan = %#v", parsed.Command(), command.Plan)
 	}
 }

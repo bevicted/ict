@@ -130,7 +130,7 @@ The same inputs work with `create`. If `--name` is omitted, ICT generates a name
 
 ### Reuse VPC Gen 2 networking
 
-VPC Gen 2 plans can reuse existing infrastructure by immutable ID: `--vpc-id` (`ICT_VPC_ID`), repeatable `--subnet-id` (`ICT_SUBNET_IDS`, comma-separated), and repeatable `--public-gateway-id` (`ICT_PUBLIC_GATEWAY_IDS`, comma-separated). VPC mode accepts at most one subnet ID and one gateway ID; IDs must be non-blank and unique. These options are not accepted for Classic or Satellite clusters.
+VPC Gen 2 and Satellite plans can reuse existing infrastructure by immutable ID: `--vpc-id` (`ICT_VPC_ID`), repeatable `--subnet-id` (`ICT_SUBNET_IDS`, comma-separated), and repeatable `--public-gateway-id` (`ICT_PUBLIC_GATEWAY_IDS`, comma-separated). VPC mode accepts at most one subnet ID and one gateway ID; Satellite mode accepts either no IDs or exactly three unique IDs in each repeated group. These options are not accepted for Classic clusters.
 
 ICT reads supplied VPCs, subnets, and gateways as Terraform data sources. It never imports or destroys them. A supplied subnet or gateway infers its VPC. When an explicit VPC is also supplied, all IDs must identify resources in that VPC and supplied subnet/gateway zones must match `--zone`. An existing subnet attachment is external and remains untouched. For an unattached supplied subnet, ICT creates and later removes only the attachment it establishes.
 
@@ -151,11 +151,31 @@ ICT_SUBNET_IDS=subnet-existing ict plan --provider vpc-gen2 --platform kubernete
   --flavor bx2.2x8 --name example-cluster
 ```
 
+### Reuse Satellite infrastructure
+
+Satellite accepts the same VPC, subnet, and public-gateway IDs. Supply either no IDs or exactly three unordered subnet IDs and exactly three unordered gateway IDs. ICT reads their provider-reported zones and requires one matching subnet and gateway in every explicit `--satellite-zone`; it never relies on input order. Supplied objects are data sources and survive `destroy`. Existing subnet-gateway attachments remain external. ICT creates and later removes only an attachment it needs for an unattached subnet.
+
+Use `--satellite-location-id` (`ICT_SATELLITE_LOCATION_ID`) for a location that already has its control plane. It must have at least three attached hosts and cover all requested zones. ICT reads it, creates no location or control-plane VSIs or assignments, and still creates and registers the managed worker VSIs for the new cluster. The IBM provider waits for the location to become `normal` during `apply`, or fails before issuing the cluster-create request; the location data source does not expose that state, so `plan` cannot validate it independently. In this mode omit `--satellite-managed-from`; it is required only when ICT creates a location.
+
+For the managed VSIs, use either `--satellite-ssh-key-id` (`ICT_SATELLITE_SSH_KEY_ID`) or `--satellite-ssh-public-key`, not both. A key ID is read by ID and is never managed. Image, profile, and one key input remain required because this release still creates Satellite worker VSIs. All supplied IDs and ownership choices are saved in the private Terraform values and recovery context, so a later `destroy` preserves externally owned VPC networking, keys, locations, and attachments.
+
+Example complete reuse with managed workers:
+
+```sh
+ict plan --provider satellite --platform openshift --version 4.17 \
+  --resource-group example-resource-group \
+  --satellite-zone us-south-1 --satellite-zone us-south-2 --satellite-zone us-south-3 \
+  --vpc-id vpc-existing --subnet-id subnet-3 --subnet-id subnet-1 --subnet-id subnet-2 \
+  --public-gateway-id gateway-2 --public-gateway-id gateway-3 --public-gateway-id gateway-1 \
+  --satellite-location-id location-existing --satellite-host-image rhel-8-synthetic \
+  --satellite-ssh-key-id key-existing --name example-satellite
+```
+
 Provider-specific inputs are:
 
 - VPC Gen 2: `--zone` and `--flavor`. The region is derived from the zone.
 - Classic: `--datacenter`, `--machine-type`, `--public-vlan-id`, and `--private-vlan-id`. Both VLAN IDs must name existing numeric VLANs. ICT does not create or manage Classic VLANs. Classic commands also require `IAAS_CLASSIC_USERNAME` and `IAAS_CLASSIC_API_KEY` in the environment.
-- Satellite: repeat `--satellite-zone` exactly three times in one region, then provide `--satellite-managed-from`, `--satellite-host-image`, and `--satellite-ssh-public-key`. Satellite requires OpenShift. `--satellite-host-profile` defaults to `bx2-4x16`, and `--satellite-worker-operating-system` defaults to `RHCOS`.
+- Satellite: repeat `--satellite-zone` exactly three times in one region. New locations require `--satellite-managed-from`; reused locations use `--satellite-location-id` instead. Provide `--satellite-host-image` and either `--satellite-ssh-key-id` or `--satellite-ssh-public-key`. Satellite requires OpenShift. `--satellite-host-profile` defaults to `bx2-4x16`, and `--satellite-worker-operating-system` defaults to `RHCOS`.
 
 `--worker-count` defaults to 1 for Kubernetes and 2 for OpenShift. Satellite is the exception and accepts only 1 or 3 workers. Satellite creates a location, three control-plane hosts, and worker hosts, so it can incur substantial VPC, compute, and Satellite costs. Confirm all selected zones, image, profile, capacity, and pricing before `create`.
 

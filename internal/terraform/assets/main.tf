@@ -33,6 +33,34 @@ data "ibm_is_public_gateways" "cluster" {
   count = var.cluster_mode == "vpc" && length(coalesce(var.public_gateway_ids, [])) == 1 ? 1 : 0
 }
 
+data "ibm_is_vpc" "satellite" {
+  count = var.cluster_mode == "satellite" && var.vpc_id != null ? 1 : 0
+
+  identifier = var.vpc_id
+}
+
+data "ibm_is_subnet" "satellite" {
+  for_each = var.cluster_mode == "satellite" ? toset(coalesce(var.subnet_ids, [])) : []
+
+  identifier = each.value
+}
+
+data "ibm_is_public_gateways" "satellite" {
+  count = var.cluster_mode == "satellite" && length(coalesce(var.public_gateway_ids, [])) > 0 ? 1 : 0
+}
+
+data "ibm_is_ssh_key" "satellite" {
+  count = var.cluster_mode == "satellite" && var.satellite_ssh_key_id != null ? 1 : 0
+
+  id = var.satellite_ssh_key_id
+}
+
+data "ibm_satellite_location" "satellite" {
+  count = var.cluster_mode == "satellite" && var.satellite_location_id != null ? 1 : 0
+
+  location = var.satellite_location_id
+}
+
 locals {
   supplied_public_gateway = var.cluster_mode == "vpc" && length(coalesce(var.public_gateway_ids, [])) == 1 ? try(one([
     for gateway in data.ibm_is_public_gateways.cluster[0].public_gateways : gateway
@@ -59,6 +87,51 @@ locals {
     local.existing_subnet_public_gateway != "" ? local.existing_subnet_public_gateway :
     ibm_is_public_gateway.cluster[0].id
   ) : null
+
+  supplied_satellite_subnets_by_zone = var.cluster_mode == "satellite" ? {
+    for zone in var.satellite_zones : zone => try(one([
+      for subnet in values(data.ibm_is_subnet.satellite) : subnet
+      if subnet.zone == zone
+    ]), null)
+  } : {}
+  supplied_satellite_gateways = var.cluster_mode == "satellite" && length(coalesce(var.public_gateway_ids, [])) > 0 ? [
+    for gateway in data.ibm_is_public_gateways.satellite[0].public_gateways : gateway
+    if contains(var.public_gateway_ids, gateway.id)
+  ] : []
+  supplied_satellite_gateways_by_zone = var.cluster_mode == "satellite" ? {
+    for zone in var.satellite_zones : zone => try(one([
+      for gateway in local.supplied_satellite_gateways : gateway
+      if gateway.zone == zone
+    ]), null)
+  } : {}
+  managed_satellite_subnet_zones = var.cluster_mode == "satellite" && length(coalesce(var.subnet_ids, [])) == 0 ? var.satellite_zones : []
+  existing_satellite_public_gateway_by_zone = var.cluster_mode == "satellite" ? {
+    for zone in var.satellite_zones : zone => try(local.supplied_satellite_subnets_by_zone[zone].public_gateway, "")
+  } : {}
+  managed_satellite_gateway_zone_list = var.cluster_mode == "satellite" && length(coalesce(var.public_gateway_ids, [])) == 0 ? [
+    for zone in var.satellite_zones : zone
+    if try(local.existing_satellite_public_gateway_by_zone[zone], "") == ""
+  ] : []
+  satellite_attachment_zone_list = var.cluster_mode == "satellite" ? [
+    for zone in var.satellite_zones : zone
+    if try(local.existing_satellite_public_gateway_by_zone[zone], "") == ""
+  ] : []
+  effective_satellite_vpc_id = var.cluster_mode == "satellite" ? (
+    var.vpc_id != null ? data.ibm_is_vpc.satellite[0].id :
+    length(coalesce(var.subnet_ids, [])) > 0 ? try(one(distinct([for subnet in values(data.ibm_is_subnet.satellite) : subnet.vpc])), "") :
+    length(coalesce(var.public_gateway_ids, [])) > 0 ? try(one(distinct([for gateway in local.supplied_satellite_gateways : gateway.vpc])), "") :
+    ibm_is_vpc.satellite[0].id
+  ) : null
+  effective_satellite_subnet_id_by_zone = var.cluster_mode == "satellite" ? {
+    for zone in var.satellite_zones : zone => length(coalesce(var.subnet_ids, [])) > 0 ? try(local.supplied_satellite_subnets_by_zone[zone].id, "") : ibm_is_subnet.satellite[index(local.managed_satellite_subnet_zones, zone)].id
+  } : {}
+  effective_satellite_gateway_id_by_zone = var.cluster_mode == "satellite" ? {
+    for zone in var.satellite_zones : zone => length(coalesce(var.public_gateway_ids, [])) > 0 ? try(local.supplied_satellite_gateways_by_zone[zone].id, "") : (
+      local.existing_satellite_public_gateway_by_zone[zone] != "" ? local.existing_satellite_public_gateway_by_zone[zone] : ibm_is_public_gateway.satellite[index(local.managed_satellite_gateway_zone_list, zone)].id
+    )
+  } : {}
+  effective_satellite_ssh_key_id  = var.cluster_mode == "satellite" ? (var.satellite_ssh_key_id != null ? data.ibm_is_ssh_key.satellite[0].id : ibm_is_ssh_key.satellite[0].id) : null
+  effective_satellite_location_id = var.cluster_mode == "satellite" ? (var.satellite_location_id != null ? data.ibm_satellite_location.satellite[0].id : ibm_satellite_location.satellite[0].id) : null
 }
 
 resource "ibm_is_vpc" "cluster" {
@@ -172,39 +245,39 @@ resource "ibm_container_cluster" "cluster" {
 }
 
 resource "ibm_is_vpc" "satellite" {
-  count = var.cluster_mode == "satellite" ? 1 : 0
+  count = var.cluster_mode == "satellite" && var.vpc_id == null && length(coalesce(var.subnet_ids, [])) == 0 && length(coalesce(var.public_gateway_ids, [])) == 0 ? 1 : 0
 
   name           = "${var.cluster_name}-satellite-vpc"
   resource_group = data.ibm_resource_group.selected.id
 }
 
 resource "ibm_is_subnet" "satellite" {
-  count = var.cluster_mode == "satellite" ? length(var.satellite_zones) : 0
+  count = length(local.managed_satellite_subnet_zones)
 
   name                     = "${var.cluster_name}-satellite-subnet-${count.index + 1}"
-  vpc                      = ibm_is_vpc.satellite[0].id
-  zone                     = var.satellite_zones[count.index]
+  vpc                      = local.effective_satellite_vpc_id
+  zone                     = local.managed_satellite_subnet_zones[count.index]
   resource_group           = data.ibm_resource_group.selected.id
   total_ipv4_address_count = 256
 }
 
 resource "ibm_is_public_gateway" "satellite" {
-  count = var.cluster_mode == "satellite" ? length(var.satellite_zones) : 0
+  count = length(local.managed_satellite_gateway_zone_list)
 
   name = "${var.cluster_name}-satellite-gateway-${count.index + 1}"
-  vpc  = ibm_is_vpc.satellite[0].id
-  zone = var.satellite_zones[count.index]
+  vpc  = local.effective_satellite_vpc_id
+  zone = local.managed_satellite_gateway_zone_list[count.index]
 }
 
 resource "ibm_is_subnet_public_gateway_attachment" "satellite" {
-  count = var.cluster_mode == "satellite" ? length(var.satellite_zones) : 0
+  count = length(local.satellite_attachment_zone_list)
 
-  subnet         = ibm_is_subnet.satellite[count.index].id
-  public_gateway = ibm_is_public_gateway.satellite[count.index].id
+  subnet         = local.effective_satellite_subnet_id_by_zone[local.satellite_attachment_zone_list[count.index]]
+  public_gateway = local.effective_satellite_gateway_id_by_zone[local.satellite_attachment_zone_list[count.index]]
 }
 
 resource "ibm_is_ssh_key" "satellite" {
-  count = var.cluster_mode == "satellite" ? 1 : 0
+  count = var.cluster_mode == "satellite" && var.satellite_ssh_key_id == null ? 1 : 0
 
   name           = "${var.cluster_name}-satellite-ssh"
   resource_group = data.ibm_resource_group.selected.id
@@ -212,7 +285,7 @@ resource "ibm_is_ssh_key" "satellite" {
 }
 
 resource "ibm_satellite_location" "satellite" {
-  count = var.cluster_mode == "satellite" ? 1 : 0
+  count = var.cluster_mode == "satellite" && var.satellite_location_id == null ? 1 : 0
 
   location          = "${var.cluster_name}-satellite"
   managed_from      = var.satellite_managed_from
@@ -226,11 +299,10 @@ resource "ibm_satellite_location" "satellite" {
         var.satellite_managed_from != null,
         var.satellite_host_image != null,
         var.satellite_host_profile != null,
-        var.satellite_ssh_public_key != null,
         var.satellite_worker_operating_system != null,
         var.satellite_zones != null,
       ])
-      error_message = "Satellite mode requires management location, three VPC zones, host image/profile, worker operating system, and an SSH public key."
+      error_message = "A new Satellite location requires management location, three VPC zones, host image/profile, and worker operating system."
     }
   }
 }
@@ -242,9 +314,9 @@ data "ibm_is_image" "satellite_host" {
 }
 
 data "ibm_satellite_attach_host_script" "satellite_control_plane" {
-  count = var.cluster_mode == "satellite" ? 1 : 0
+  count = var.cluster_mode == "satellite" && var.satellite_location_id == null ? 1 : 0
 
-  location      = ibm_satellite_location.satellite[0].id
+  location      = local.effective_satellite_location_id
   labels        = ["satellite-role:control-plane"]
   host_provider = "ibm"
 }
@@ -252,34 +324,34 @@ data "ibm_satellite_attach_host_script" "satellite_control_plane" {
 data "ibm_satellite_attach_host_script" "satellite_worker" {
   count = var.cluster_mode == "satellite" ? 1 : 0
 
-  location      = ibm_satellite_location.satellite[0].id
+  location      = local.effective_satellite_location_id
   labels        = ["satellite-role:cluster-worker"]
   host_provider = "ibm"
 }
 
 resource "ibm_is_instance" "satellite_control_plane" {
-  count = var.cluster_mode == "satellite" ? 3 : 0
+  count = var.cluster_mode == "satellite" && var.satellite_location_id == null ? 3 : 0
 
   depends_on = [ibm_is_subnet_public_gateway_attachment.satellite]
 
   name           = "${var.cluster_name}-satellite-control-${count.index + 1}"
-  vpc            = ibm_is_vpc.satellite[0].id
+  vpc            = local.effective_satellite_vpc_id
   zone           = var.satellite_zones[count.index]
   image          = data.ibm_is_image.satellite_host[0].id
   profile        = var.satellite_host_profile
-  keys           = [ibm_is_ssh_key.satellite[0].id]
+  keys           = [local.effective_satellite_ssh_key_id]
   resource_group = data.ibm_resource_group.selected.id
   user_data      = data.ibm_satellite_attach_host_script.satellite_control_plane[0].host_script
 
   primary_network_interface {
-    subnet = ibm_is_subnet.satellite[count.index].id
+    subnet = local.effective_satellite_subnet_id_by_zone[var.satellite_zones[count.index]]
   }
 }
 
 resource "ibm_satellite_host" "satellite_control_plane" {
-  count = var.cluster_mode == "satellite" ? 3 : 0
+  count = var.cluster_mode == "satellite" && var.satellite_location_id == null ? 3 : 0
 
-  location      = ibm_satellite_location.satellite[0].id
+  location      = local.effective_satellite_location_id
   host_id       = ibm_is_instance.satellite_control_plane[count.index].name
   labels        = ["satellite-role:control-plane"]
   zone          = var.satellite_zones[count.index]
@@ -293,16 +365,16 @@ resource "ibm_is_instance" "satellite_worker" {
   depends_on = [ibm_is_subnet_public_gateway_attachment.satellite]
 
   name           = "${var.cluster_name}-satellite-worker-${count.index + 1}"
-  vpc            = ibm_is_vpc.satellite[0].id
+  vpc            = local.effective_satellite_vpc_id
   zone           = var.satellite_zones[count.index % length(var.satellite_zones)]
   image          = data.ibm_is_image.satellite_host[0].id
   profile        = var.satellite_host_profile
-  keys           = [ibm_is_ssh_key.satellite[0].id]
+  keys           = [local.effective_satellite_ssh_key_id]
   resource_group = data.ibm_resource_group.selected.id
   user_data      = data.ibm_satellite_attach_host_script.satellite_worker[0].host_script
 
   primary_network_interface {
-    subnet = ibm_is_subnet.satellite[count.index % length(var.satellite_zones)].id
+    subnet = local.effective_satellite_subnet_id_by_zone[var.satellite_zones[count.index % length(var.satellite_zones)]]
   }
 }
 
@@ -312,7 +384,7 @@ resource "ibm_satellite_cluster" "satellite" {
   depends_on = [ibm_satellite_host.satellite_control_plane]
 
   name                    = var.cluster_name
-  location                = ibm_satellite_location.satellite[0].id
+  location                = local.effective_satellite_location_id
   resource_group_id       = data.ibm_resource_group.selected.id
   kube_version            = var.kube_version
   operating_system        = var.satellite_worker_operating_system
@@ -328,6 +400,47 @@ resource "ibm_satellite_cluster" "satellite" {
   default_worker_pool_labels = {
     "satellite-role" = "cluster-worker"
   }
+
+  lifecycle {
+    precondition {
+      condition     = length(coalesce(var.subnet_ids, [])) == 0 || (length(data.ibm_is_subnet.satellite) == length(var.satellite_zones) && alltrue([for zone in var.satellite_zones : try(local.supplied_satellite_subnets_by_zone[zone].id, "") != ""]))
+      error_message = "Supplied Satellite subnet IDs must provide exactly one subnet in every requested zone."
+    }
+
+    precondition {
+      condition     = length(coalesce(var.public_gateway_ids, [])) == 0 || (length(local.supplied_satellite_gateways) == length(var.satellite_zones) && alltrue([for zone in var.satellite_zones : try(local.supplied_satellite_gateways_by_zone[zone].id, "") != ""]))
+      error_message = "Supplied Satellite public gateway IDs must provide exactly one gateway in every requested zone."
+    }
+
+    precondition {
+      condition = length(distinct(compact(concat(
+        var.vpc_id != null ? [data.ibm_is_vpc.satellite[0].id] : [],
+        [for subnet in values(data.ibm_is_subnet.satellite) : subnet.vpc],
+        [for gateway in local.supplied_satellite_gateways : gateway.vpc],
+      )))) <= 1
+      error_message = "Supplied Satellite VPC, subnets, and public gateways must belong to one VPC."
+    }
+
+    precondition {
+      condition     = alltrue([for zone in var.satellite_zones : length(coalesce(var.subnet_ids, [])) == 0 || try(local.supplied_satellite_subnets_by_zone[zone].zone, "") == zone])
+      error_message = "Supplied Satellite subnets must match the requested zones."
+    }
+
+    precondition {
+      condition     = alltrue([for zone in var.satellite_zones : length(coalesce(var.public_gateway_ids, [])) == 0 || try(local.supplied_satellite_gateways_by_zone[zone].zone, "") == zone])
+      error_message = "Supplied Satellite public gateways must match the requested zones."
+    }
+
+    precondition {
+      condition     = alltrue([for zone in var.satellite_zones : try(local.existing_satellite_public_gateway_by_zone[zone], "") == "" || local.existing_satellite_public_gateway_by_zone[zone] == local.effective_satellite_gateway_id_by_zone[zone]])
+      error_message = "A supplied Satellite subnet already has a different public gateway attachment."
+    }
+
+    precondition {
+      condition     = var.satellite_location_id == null || (data.ibm_satellite_location.satellite[0].host_attached_count >= 3 && length(setsubtract(toset(var.satellite_zones), data.ibm_satellite_location.satellite[0].zones)) == 0)
+      error_message = "The supplied Satellite location must have at least three attached hosts and cover every requested zone."
+    }
+  }
 }
 
 resource "ibm_satellite_host" "satellite_worker" {
@@ -335,7 +448,7 @@ resource "ibm_satellite_host" "satellite_worker" {
 
   depends_on = [ibm_satellite_cluster.satellite]
 
-  location      = ibm_satellite_location.satellite[0].id
+  location      = local.effective_satellite_location_id
   cluster       = ibm_satellite_cluster.satellite[0].id
   worker_pool   = "default"
   host_id       = ibm_is_instance.satellite_worker[count.index].name

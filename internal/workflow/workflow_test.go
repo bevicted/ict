@@ -396,7 +396,7 @@ func TestVPCReuseValidationPersistenceAndRecovery(t *testing.T) {
 			in.Zone, in.Flavor = "", ""
 			in.Datacenter, in.MachineType, in.PublicVLANID, in.PrivateVLANID = "dal10", "bx2.2x8", "123", "456"
 			in.VPCID = "vpc-existing"
-		}, want: "only supported by the vpc-gen2 provider"},
+		}, want: "only supported by the vpc-gen2 or satellite provider"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			inputs := configuredInputs(t)

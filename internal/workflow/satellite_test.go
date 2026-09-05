@@ -247,6 +247,49 @@ func TestSatelliteSSHInputValidation(t *testing.T) {
 	}
 }
 
+func TestSatelliteReusePersistsOwnershipWithoutPublicKey(t *testing.T) {
+	workspace := t.TempDir()
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	inputs := configuredSatelliteInputs(t)
+	inputs.SatelliteManagedFrom = ""
+	inputs.SatelliteLocationID = " location-existing "
+	inputs.SatelliteSSHPublicKeyPath = ""
+	inputs.SatelliteSSHKeyID = " key-existing "
+	inputs.VPCID = " vpc-existing "
+	inputs.SubnetIDs = []string{"subnet-3", "subnet-1", "subnet-2"}
+	inputs.PublicGatewayIDs = []string{"gateway-2", "gateway-3", "gateway-1"}
+
+	if err := runner.Plan(context.Background(), inputs); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{ictterraform.TFVarsName, ictterraform.ContextName} {
+		contents, err := os.ReadFile(filepath.Join(workspace, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"vpc-existing", "subnet-1", "gateway-1", "location-existing", "key-existing"} {
+			if !strings.Contains(string(contents), id) {
+				t.Fatalf("%s does not persist %s", path, id)
+			}
+		}
+		if strings.Contains(string(contents), "ssh-ed25519") {
+			t.Fatalf("%s contains SSH public-key material", path)
+		}
+	}
+	writeTerraformState(t, workspace)
+	fake.resources = true
+	changed := inputs
+	changed.SatelliteLocationID = "location-other"
+	fake.calls = nil
+	if err := runner.Create(context.Background(), changed); err == nil || !strings.Contains(err.Error(), "requested inputs differ") {
+		t.Fatalf("changed Satellite location create error = %v", err)
+	}
+	if err := runner.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSatelliteTerraformTopology(t *testing.T) {
 	asset, err := os.ReadFile(filepath.Join("..", "terraform", "assets", "main.tf"))
 	if err != nil {
@@ -255,7 +298,11 @@ func TestSatelliteTerraformTopology(t *testing.T) {
 	contents := string(asset)
 	for _, required := range []string{
 		"ibm_is_instance\" \"satellite_control_plane\"",
-		"count = var.cluster_mode == \"satellite\" ? 3 : 0",
+		"count = var.cluster_mode == \"satellite\" && var.satellite_location_id == null ? 3 : 0",
+		"data \"ibm_satellite_location\" \"satellite\"",
+		"data \"ibm_is_ssh_key\" \"satellite\"",
+		"effective_satellite_subnet_id_by_zone",
+		"effective_satellite_gateway_id_by_zone",
 		"ibm_is_instance\" \"satellite_worker\"",
 		"count = var.cluster_mode == \"satellite\" ? var.worker_count : 0",
 		"satellite-role:control-plane",

@@ -87,24 +87,24 @@ variable "vpc_id" {
 }
 
 variable "subnet_ids" {
-  description = "Existing VPC Gen 2 subnet IDs. VPC mode accepts at most one."
+  description = "Existing VPC Gen 2 subnet IDs. VPC mode accepts one; Satellite mode accepts three unordered IDs."
   type        = list(string)
   default     = null
 
   validation {
-    condition     = var.subnet_ids == null || (length(var.subnet_ids) <= 1 && length(distinct(var.subnet_ids)) == length(var.subnet_ids) && alltrue([for id in var.subnet_ids : trimspace(id) != ""]))
-    error_message = "subnet_ids must contain at most one distinct, non-blank ID."
+    condition     = var.subnet_ids == null || (contains([1, 3], length(var.subnet_ids)) && length(distinct(var.subnet_ids)) == length(var.subnet_ids) && alltrue([for id in var.subnet_ids : trimspace(id) != ""]))
+    error_message = "subnet_ids must contain one or three distinct, non-blank IDs."
   }
 }
 
 variable "public_gateway_ids" {
-  description = "Existing VPC Gen 2 public gateway IDs. VPC mode accepts at most one."
+  description = "Existing VPC Gen 2 public gateway IDs. VPC mode accepts one; Satellite mode accepts three unordered IDs."
   type        = list(string)
   default     = null
 
   validation {
-    condition     = var.public_gateway_ids == null || (length(var.public_gateway_ids) <= 1 && length(distinct(var.public_gateway_ids)) == length(var.public_gateway_ids) && alltrue([for id in var.public_gateway_ids : trimspace(id) != ""]))
-    error_message = "public_gateway_ids must contain at most one distinct, non-blank ID."
+    condition     = var.public_gateway_ids == null || (contains([1, 3], length(var.public_gateway_ids)) && length(distinct(var.public_gateway_ids)) == length(var.public_gateway_ids) && alltrue([for id in var.public_gateway_ids : trimspace(id) != ""]))
+    error_message = "public_gateway_ids must contain one or three distinct, non-blank IDs."
   }
 }
 
@@ -164,9 +164,20 @@ variable "satellite_zones" {
 }
 
 variable "satellite_managed_from" {
-  description = "IBM Cloud multizone location that manages the Satellite location."
+  description = "IBM Cloud multizone location that manages an ICT-created Satellite location."
   type        = string
   default     = null
+}
+
+variable "satellite_location_id" {
+  description = "Existing Satellite location ID. Terraform reads it and never manages it."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.satellite_location_id == null || trimspace(var.satellite_location_id) != ""
+    error_message = "satellite_location_id must not be blank."
+  }
 }
 
 variable "satellite_host_image" {
@@ -182,9 +193,20 @@ variable "satellite_host_profile" {
 }
 
 variable "satellite_ssh_public_key" {
-  description = "Supplied SSH public key used only for disposable Satellite hosts."
+  description = "Supplied SSH public key used only for disposable Satellite hosts when no existing key ID is supplied."
   type        = string
   default     = null
+}
+
+variable "satellite_ssh_key_id" {
+  description = "Existing VPC SSH key ID. Terraform reads it and never manages it."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.satellite_ssh_key_id == null || trimspace(var.satellite_ssh_key_id) != ""
+    error_message = "satellite_ssh_key_id must not be blank."
+  }
 }
 
 variable "satellite_worker_operating_system" {
