@@ -23,7 +23,7 @@ type CLI struct {
 
 // VPCCommand contains the transient inputs for create.
 type VPCCommand struct {
-	StateID                        string   `name:"state-id" help:"Terraform state workspace identifier." env:"ICT_STATE_ID" default:"default"`
+	StateID                        string   `arg:"" name:"state-id" help:"Terraform state workspace identifier."`
 	Config                         string   `help:"Target configuration file." env:"ICT_CONFIG"`
 	Target                         string   `help:"Configured target name." env:"ICT_TARGET"`
 	Provider                       string   `help:"Cluster provider (vpc-gen2, classic, or satellite)." env:"ICT_PROVIDER"`
@@ -56,7 +56,7 @@ type VPCCommand struct {
 
 // Destroy deliberately accepts no replacement cluster inputs.
 type Destroy struct {
-	StateID string `name:"state-id" help:"Terraform state workspace identifier." env:"ICT_STATE_ID" default:"default"`
+	StateID string `arg:"" name:"state-id" help:"Terraform state workspace identifier."`
 }
 
 // ListCommand deliberately accepts no options.
@@ -123,13 +123,13 @@ func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 // Run dispatches the selected command through its appropriate runner.
 func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 	switch parsed.Command() {
-	case "create":
+	case "create <state-id>":
 		runner, err := r.lifecycle(command.Create.StateID)
 		if err != nil {
 			return err
 		}
 		return runner.Create(ctx, command.Create.inputs())
-	case "destroy":
+	case "destroy <state-id>":
 		runner, err := r.lifecycle(command.Destroy.StateID)
 		if err != nil {
 			return err

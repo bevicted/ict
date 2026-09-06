@@ -14,11 +14,11 @@ import (
 
 func TestCreateGrammarParsesApprovalAndRejectsPlan(t *testing.T) {
 	t.Setenv("ICT_AUTO_APPROVE", "true")
-	parsed, command, err := Parse([]string{"create", "--config", "config.yaml", "--name", "fixture-cluster"})
+	parsed, command, err := Parse([]string{"create", "fixture", "--config", "config.yaml", "--name", "fixture-cluster"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "create" || command.Create.Config != "config.yaml" || command.Create.Name != "fixture-cluster" || !command.Create.AutoApprove {
+	if parsed.Command() != "create <state-id>" || command.Create.Config != "config.yaml" || command.Create.Name != "fixture-cluster" || !command.Create.AutoApprove {
 		t.Fatalf("create = %#v", command.Create)
 	}
 	if _, _, err := Parse([]string{"plan"}); err == nil {
@@ -26,33 +26,42 @@ func TestCreateGrammarParsesApprovalAndRejectsPlan(t *testing.T) {
 	}
 }
 
-func TestCreateStateIDAndInputs(t *testing.T) {
-	t.Setenv("ICT_STATE_ID", "from-environment")
-	_, command, err := Parse([]string{"create", "--state-id", "from-flag", "--provider", "vpc-gen2", "--subnet-id", "subnet-existing", "--auto-approve"})
+func TestLifecycleStateIDIsRequiredPositionalArgument(t *testing.T) {
+	_, command, err := Parse([]string{"create", "from-argument", "--provider", "vpc-gen2", "--subnet-id", "subnet-existing", "--auto-approve"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command.Create.StateID != "from-flag" || command.Create.Provider != "vpc-gen2" || strings.Join(command.Create.SubnetIDs, ",") != "subnet-existing" || !command.Create.AutoApprove {
+	if command.Create.StateID != "from-argument" || command.Create.Provider != "vpc-gen2" || strings.Join(command.Create.SubnetIDs, ",") != "subnet-existing" || !command.Create.AutoApprove {
 		t.Fatalf("create = %#v", command.Create)
 	}
-	_, command, err = Parse([]string{"create"})
+
+	_, command, err = Parse([]string{"destroy", "from-argument"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command.Create.StateID != "from-environment" {
-		t.Fatalf("state ID = %q", command.Create.StateID)
+	if command.Destroy.StateID != "from-argument" {
+		t.Fatalf("destroy = %#v", command.Destroy)
+	}
+
+	t.Setenv("ICT_STATE_ID", "legacy-environment")
+	for _, args := range [][]string{{"create"}, {"destroy"}, {"create", "from-argument", "--state-id", "old-flag"}, {"destroy", "from-argument", "--state-id", "old-flag"}} {
+		if _, _, err := Parse(args); err == nil {
+			t.Errorf("Parse(%q) accepted invalid lifecycle syntax", args)
+		}
 	}
 }
 
 func TestLifecycleRejectsInvalidStateIDBeforeWorkflow(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
-	parsed, command, err := Parse([]string{"create", "--state-id", "../outside", "--auto-approve"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Run(context.Background(), parsed, command); err == nil || !strings.Contains(err.Error(), "invalid state ID") {
-		t.Fatalf("Run error = %v", err)
+	for _, args := range [][]string{{"create", "../outside", "--auto-approve"}, {"destroy", "../outside"}} {
+		parsed, command, err := Parse(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Run(context.Background(), parsed, command); err == nil || !strings.Contains(err.Error(), "invalid state ID") {
+			t.Fatalf("Run error = %v", err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(stateHome, "ict")); !os.IsNotExist(err) {
 		t.Fatalf("invalid state ID created state root: %v", err)

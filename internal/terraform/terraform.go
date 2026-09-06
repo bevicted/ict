@@ -82,7 +82,7 @@ func ReserveWorkspace(workspace string) error {
 	}
 	if err := os.Mkdir(workspace, 0o700); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("Terraform workspace already exists: %s; run ict destroy first", workspace)
+			return fmt.Errorf("Terraform workspace already exists: %s; run ict destroy %q first", workspace, filepath.Base(workspace))
 		}
 		return fmt.Errorf("reserve Terraform workspace: %w", err)
 	}

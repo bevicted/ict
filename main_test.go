@@ -30,8 +30,8 @@ func TestPrintParseUsageForMissingCommand(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage: ict <command>",
-		"create [flags]",
-		"destroy [flags]",
+		"create <state-id> [flags]",
+		"destroy <state-id>",
 		"list (ls)",
 		"config show [flags]",
 		"config get <path> [flags]",
