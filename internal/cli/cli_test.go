@@ -13,12 +13,19 @@ import (
 )
 
 func TestCreateGrammarParsesApprovalAndRejectsPlan(t *testing.T) {
-	t.Setenv("ICT_AUTO_APPROVE", "true")
-	parsed, command, err := Parse([]string{"create", "fixture", "--config", "config.yaml", "--name", "fixture-cluster"})
+	parsed, command, err := Parse([]string{"create", "fixture", "--config", "config.yaml", "--name", "fixture-cluster", "--confirm-stdin"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "create <state-id>" || command.Create.Config != "config.yaml" || command.Create.Name != "fixture-cluster" || !command.Create.AutoApprove {
+	if parsed.Command() != "create <state-id>" || command.Create.Config != "config.yaml" || command.Create.Name != "fixture-cluster" || !command.Create.ConfirmStdin {
+		t.Fatalf("create = %#v", command.Create)
+	}
+	t.Setenv("ICT_AUTO_APPROVE", "true")
+	_, command, err = Parse([]string{"create", "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !command.Create.AutoApprove {
 		t.Fatalf("create = %#v", command.Create)
 	}
 	if _, _, err := Parse([]string{"plan"}); err == nil {

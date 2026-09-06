@@ -111,6 +111,10 @@ When standard input is not a terminal, `config edit` reads the complete input an
 
 Use `create` to generate and display one Terraform plan, then apply that exact saved plan after confirmation. Each lifecycle action requires its state workspace ID as the first positional argument: `ict create ID` or `ict destroy ID`. Interactive `create` applies only when the response is the literal `yes`. Use `--auto-approve` or `ICT_AUTO_APPROVE=true` for non-interactive callers; without either, a non-interactive create fails before creating a workspace.
 
+A supervised caller that must retain the literal confirmation can use `ict create ID --confirm-stdin` and provide `yes` followed by a newline through standard input. This does not auto-approve: only that exact response applies the saved plan. A non-yes response declines and removes the un-applied workspace; an input read failure returns an error without applying.
+
+ICT responds to interrupt and termination by sending one graceful interrupt to a running Terraform command and waiting for Terraform to exit so it can persist state. A provider can remain blocked until an in-flight operation returns. Supervisors must wait for ICT to exit before running `ict destroy ID`; ICT does not start destroy when interrupted.
+
 A fully specified VPC Gen 2 create looks like this:
 
 ```sh

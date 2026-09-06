@@ -52,6 +52,7 @@ type VPCCommand struct {
 	Owner                          string   `help:"Owner used when generating a name." env:"ICT_OWNER"`
 	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
 	AutoApprove                    bool     `help:"Apply without interactive approval." env:"ICT_AUTO_APPROVE"`
+	ConfirmStdin                   bool     `help:"Allow a supervised caller to provide the literal confirmation through standard input."`
 }
 
 // Destroy deliberately accepts no replacement cluster inputs.
@@ -181,5 +182,5 @@ func (r Runner) lifecycle(stateID string) (workflow.Runner, error) {
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name, AutoApprove: c.AutoApprove}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name, AutoApprove: c.AutoApprove, ConfirmStdin: c.ConfirmStdin}
 }

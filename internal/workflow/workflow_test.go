@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	ictterraform "github.com/bevicted/ict/internal/terraform"
 )
@@ -164,6 +165,108 @@ func TestCreateApprovalPaths(t *testing.T) {
 	}
 }
 
+func TestCreateConfirmStdinApprovalPaths(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		input     string
+		wantError string
+		wantGone  bool
+		wantApply bool
+	}{
+		{name: "piped literal yes", input: "yes\n", wantApply: true},
+		{name: "piped decline", input: "Yes\n", wantGone: true},
+		{name: "piped EOF", wantError: "read confirmation"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			fake := &fakeTerraform{}
+			runner := newRunner(workspace, fake)
+			runner.Stdin = strings.NewReader(test.input)
+			inputs := configuredInputs(t)
+			inputs.ConfirmStdin = true
+
+			err := runner.Create(context.Background(), inputs)
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("error = %v", err)
+			}
+			if test.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			_, statErr := os.Stat(workspace)
+			if test.wantGone != os.IsNotExist(statErr) {
+				t.Fatalf("workspace stat = %v, wantGone=%t", statErr, test.wantGone)
+			}
+			gotApply := strings.Contains(strings.Join(actionNames(fake.calls), ","), "apply")
+			if gotApply != test.wantApply {
+				t.Fatalf("actions = %#v", fake.calls)
+			}
+		})
+	}
+}
+
+func TestExecRunnerCancellationGracefullyInterruptsTerraform(t *testing.T) {
+	bin := t.TempDir()
+	ready := filepath.Join(bin, "ready")
+	interrupted := filepath.Join(bin, "interrupted")
+	release := filepath.Join(bin, "release")
+	terraform := filepath.Join(bin, "terraform")
+	script := "#!/bin/sh\ntrap 'printf interrupt >> \"$INTERRUPTED\"; while [ ! -e \"$RELEASE\" ]; do sleep 0.01; done; exit 0' INT\n: > \"$READY\"\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(terraform, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := os.Getenv("PATH")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+path)
+	t.Setenv("READY", ready)
+	t.Setenv("INTERRUPTED", interrupted)
+	t.Setenv("RELEASE", release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- (ExecRunner{}).Run(ctx, os.Environ(), io.Discard, io.Discard, "terraform", "apply")
+	}()
+	waitForFile := func(path string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(path); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", path)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitForFile(ready)
+	cancel()
+	waitForFile(interrupted)
+	select {
+	case err := <-done:
+		t.Fatalf("Terraform returned before its interrupt handler completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("run error = %v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Terraform was not awaited after graceful interrupt")
+	}
+	data, err := os.ReadFile(interrupted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "interrupt"); got != 1 {
+		t.Fatalf("interrupt count = %d, want 1", got)
+	}
+}
+
 func TestCreatePreflightFailureDoesNotReserveWorkspace(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	fake := &fakeTerraform{}
@@ -179,6 +282,23 @@ func TestCreatePreflightFailureDoesNotReserveWorkspace(t *testing.T) {
 	}
 	if len(fake.calls) != 0 {
 		t.Fatalf("preflight called Terraform: %#v", fake.calls)
+	}
+}
+
+func TestCreatePreservesWorkspaceOnCanceledApply(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	fake := &fakeTerraform{applyErr: context.Canceled}
+	runner := newRunner(workspace, fake)
+	inputs := configuredInputs(t)
+	inputs.AutoApprove = true
+	if err := runner.Create(context.Background(), inputs); !errors.Is(err, context.Canceled) {
+		t.Fatalf("create error = %v, want context cancellation", err)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("canceled apply removed workspace: %v", err)
+	}
+	if got, want := strings.Join(actionNames(fake.calls), ","), "init,plan,apply"; got != want {
+		t.Fatalf("actions = %q, want %q", got, want)
 	}
 }
 

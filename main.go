@@ -5,15 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/alecthomas/kong"
 	"github.com/bevicted/ict/internal/cli"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	parsed, command, err := cli.Parse(os.Args[1:])
 	if err == nil {
-		err = cli.Run(context.Background(), parsed, command)
+		err = cli.Run(ctx, parsed, command)
 	}
 	if err != nil {
 		if usageErr := printParseUsage(err); usageErr != nil {

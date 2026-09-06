@@ -75,6 +75,7 @@ type Inputs struct {
 	Owner                          string
 	Name                           string
 	AutoApprove                    bool
+	ConfirmStdin                   bool
 }
 
 // Values are the normalized values persisted in tfvars and recovery context.
@@ -158,6 +159,7 @@ func terraformCommand(ctx context.Context, environ []string, command string, arg
 		return nil, fmt.Errorf("unsupported Terraform command %q", command)
 	}
 	cmd := exec.CommandContext(ctx, "terraform", args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.Env = environ
 	return cmd, nil
 }
@@ -272,8 +274,8 @@ func (r Runner) Create(ctx context.Context, supplied Inputs) error {
 			return err
 		}
 	}
-	if !supplied.AutoApprove && !r.terminal() {
-		return errors.New("create requires --auto-approve or ICT_AUTO_APPROVE when standard input is not interactive")
+	if !supplied.AutoApprove && !supplied.ConfirmStdin && !r.terminal() {
+		return errors.New("create requires --auto-approve, --confirm-stdin, or ICT_AUTO_APPROVE when standard input is not interactive")
 	}
 	recovery, err := newRecoveryContext(target, values)
 	if err != nil {
