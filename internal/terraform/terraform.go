@@ -3,6 +3,7 @@ package terraform
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -10,12 +11,13 @@ import (
 	"regexp"
 )
 
-//go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl assets/cluster-name.tftest.hcl assets/satellite-topology.tftest.hcl assets/vpc-reuse.tftest.hcl
+//go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl
 var assets embed.FS
 
 const (
 	TFVarsName  = ".cluster/cluster.tfvars.json"
 	ContextName = ".cluster/context.json"
+	PlanName    = ".cluster/create.tfplan"
 )
 
 const DefaultStateID = "default"
@@ -32,7 +34,8 @@ func StateRoot() (string, error) {
 		}
 		stateHome = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(stateHome, "ict"), nil
+	root := filepath.Join(stateHome, "ict")
+	return root, nil
 }
 
 // Workspace returns the selected Terraform workspace without creating it.
@@ -44,7 +47,8 @@ func Workspace(stateID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, stateID), nil
+	workspace := filepath.Join(root, stateID)
+	return workspace, nil
 }
 
 // ListWorkspaces returns the valid immediate workspace directories in lexical order.
@@ -71,6 +75,23 @@ func ListWorkspaces() ([]string, error) {
 	return workspaces, nil
 }
 
+// ReserveWorkspace atomically creates a private, previously absent workspace.
+func ReserveWorkspace(workspace string) error {
+	if err := os.MkdirAll(filepath.Dir(workspace), 0o700); err != nil {
+		return fmt.Errorf("create Terraform state root: %w", err)
+	}
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("Terraform workspace already exists: %s; run ict destroy first", workspace)
+		}
+		return fmt.Errorf("reserve Terraform workspace: %w", err)
+	}
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		return fmt.Errorf("protect Terraform workspace: %w", err)
+	}
+	return nil
+}
+
 // Materialize writes the canonical Terraform files without altering state files.
 func Materialize(workspace string) error {
 	if err := os.MkdirAll(filepath.Join(workspace, ".cluster"), 0o700); err != nil {
@@ -83,12 +104,9 @@ func Materialize(workspace string) error {
 		return fmt.Errorf("protect Terraform runtime directory: %w", err)
 	}
 	for source, destination := range map[string]string{
-		"assets/main.tf":                       "main.tf",
-		"assets/variables.tf":                  "variables.tf",
-		"assets/.terraform.lock.hcl":           ".terraform.lock.hcl",
-		"assets/cluster-name.tftest.hcl":       "cluster-name.tftest.hcl",
-		"assets/satellite-topology.tftest.hcl": "satellite-topology.tftest.hcl",
-		"assets/vpc-reuse.tftest.hcl":          "vpc-reuse.tftest.hcl",
+		"assets/main.tf":             "main.tf",
+		"assets/variables.tf":        "variables.tf",
+		"assets/.terraform.lock.hcl": ".terraform.lock.hcl",
 	} {
 		contents, err := fs.ReadFile(assets, source)
 		if err != nil {
@@ -134,5 +152,8 @@ func atomicWrite(path string, contents []byte) error {
 	if err := os.Rename(name, path); err != nil {
 		return fmt.Errorf("replace runtime file: %w", err)
 	}
-	return os.Chmod(path, 0o600)
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("protect runtime file: %w", err)
+	}
+	return nil
 }

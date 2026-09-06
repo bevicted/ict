@@ -28,6 +28,40 @@ func TestWorkspaceUsesStateRootAndStateID(t *testing.T) {
 	}
 }
 
+func TestReserveWorkspaceIsAtomicAndPrivate(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "state", "ict", "one")
+	if err := ReserveWorkspace(workspace); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(workspace)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("workspace = %v, %v", info, err)
+	}
+	if err := ReserveWorkspace(workspace); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second reservation error = %v", err)
+	}
+}
+
+func TestMaterializeOmitsRepositoryTestFiles(t *testing.T) {
+	workspace := t.TempDir()
+	if err := Materialize(workspace); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"main.tf", "variables.tf", ".terraform.lock.hcl"} {
+		if _, err := os.Stat(filepath.Join(workspace, name)); err != nil {
+			t.Fatalf("missing production file %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"cluster-name.tftest.hcl", "satellite-topology.tftest.hcl", "vpc-reuse.tftest.hcl"} {
+		if _, err := os.Stat(filepath.Join(workspace, name)); !os.IsNotExist(err) {
+			t.Fatalf("materialized test file %s: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join("assets", name)); err != nil {
+			t.Fatalf("repository test source %s missing: %v", name, err)
+		}
+	}
+}
+
 func TestWorkspaceFallsBackToLocalState(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", "")

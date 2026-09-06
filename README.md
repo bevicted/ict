@@ -25,7 +25,7 @@ Then run the binary as `./ict` or place it on `PATH` as `ict`.
 
 ## Configuration
 
-`plan` and `create` require a strict, single-document YAML configuration. ICT resolves it in this order:
+`create` requires a strict, single-document YAML configuration. ICT resolves it in this order:
 
 1. `--config PATH`
 2. `ICT_CONFIG`
@@ -109,12 +109,12 @@ When standard input is not a terminal, `config edit` reads the complete input an
 
 ## Lifecycle
 
-Use `plan` to review Terraform changes, `create` to apply them, and `destroy` only to destroy the saved active cluster. Each lifecycle action selects its state workspace with `--state-id ID` or `ICT_STATE_ID`; an action without either uses `default`. `create` and `destroy` use Terraform auto-approval, so review a plan first.
+Use `create` to generate and display one Terraform plan, then apply that exact saved plan after confirmation. Each lifecycle action selects its state workspace with `--state-id ID` or `ICT_STATE_ID`; an action without either uses `default`. Interactive `create` applies only when the response is the literal `yes`. Use `--auto-approve` or `ICT_AUTO_APPROVE=true` for non-interactive callers; without either, a non-interactive create fails before creating a workspace.
 
-A fully specified VPC Gen 2 plan looks like this:
+A fully specified VPC Gen 2 create looks like this:
 
 ```sh
-ict plan \
+ict create \
   --config "$HOME/.config/ict/config.yaml" \
   --target example \
   --provider vpc-gen2 \
@@ -126,7 +126,7 @@ ict plan \
   --name example-cluster
 ```
 
-The same inputs work with `create`. If `--name` is omitted, ICT generates a name from `--owner` (or `USER`) plus a timestamp and random suffix. All lifecycle options, including `--state-id`, can also be supplied through their matching `ICT_*` environment variable shown by `ict plan --help`.
+If `--name` is omitted, ICT generates a name from `--owner` (or `USER`) plus a timestamp and random suffix. All lifecycle options, including `--state-id`, can also be supplied through their matching `ICT_*` environment variable shown by `ict create --help`. ICT saves the reviewed plan at `.cluster/create.tfplan` with mode `0600`; treat it as sensitive and leave it in place until `ict destroy` removes the workspace.
 
 ### Reuse VPC Gen 2 networking
 
@@ -137,7 +137,7 @@ ICT reads supplied VPCs, subnets, and gateways as Terraform data sources. It nev
 Omitted IDs create only a dependency the cluster still needs. Complete reuse creates the cluster, but no VPC, subnet, or gateway:
 
 ```sh
-ict plan --provider vpc-gen2 --platform kubernetes --version 1.31 \
+ict create --provider vpc-gen2 --platform kubernetes --version 1.31 \
   --resource-group example-resource-group --zone us-south-1 --flavor bx2.2x8 \
   --vpc-id vpc-existing --subnet-id subnet-existing \
   --public-gateway-id gateway-existing --name example-cluster
@@ -146,7 +146,7 @@ ict plan --provider vpc-gen2 --platform kubernetes --version 1.31 \
 Mixed ownership is also supported. This plan reads the existing subnet, infers its VPC, and creates only a gateway and its attachment when the subnet is unattached:
 
 ```sh
-ICT_SUBNET_IDS=subnet-existing ict plan --provider vpc-gen2 --platform kubernetes \
+ICT_SUBNET_IDS=subnet-existing ict create --provider vpc-gen2 --platform kubernetes \
   --version 1.31 --resource-group example-resource-group --zone us-south-1 \
   --flavor bx2.2x8 --name example-cluster
 ```
@@ -162,7 +162,7 @@ For ICT-managed worker VSIs, use either `--satellite-ssh-key-id` (`ICT_SATELLITE
 Example complete reuse with managed workers:
 
 ```sh
-ict plan --provider satellite --platform openshift --version 4.17 \
+ict create --provider satellite --platform openshift --version 4.17 \
   --resource-group example-resource-group \
   --satellite-zone us-south-1 --satellite-zone us-south-2 --satellite-zone us-south-3 \
   --vpc-id vpc-existing --subnet-id subnet-3 --subnet-id subnet-1 --subnet-id subnet-2 \
@@ -178,7 +178,7 @@ For an existing worker group, repeat `--satellite-worker-instance-id` (`ICT_SATE
 A reused worker group has no VPC, subnet, gateway, SSH key, image, profile, or attach-script consumer. Omit those creation inputs; ICT rejects supplied networking, image, profile, and SSH-key inputs rather than silently ignoring them. Explicit `--satellite-zone` values and the worker operating system remain required for cluster topology. This fully reused plan creates only the cluster and its worker assignments:
 
 ```sh
-ict plan --provider satellite --platform openshift --version 4.17 \
+ict create --provider satellite --platform openshift --version 4.17 \
   --resource-group example-resource-group --worker-count 3 \
   --satellite-zone us-south-1 --satellite-zone us-south-2 --satellite-zone us-south-3 \
   --satellite-location-id location-existing \
@@ -202,12 +202,12 @@ When target, provider, or any required provider input is omitted, ICT may use IB
 ict destroy
 ```
 
-`destroy` accepts no replacement cluster inputs other than `--state-id` (`ICT_STATE_ID`). It uses only the selected workspace's saved recovery context and values, refuses an empty state, and refuses plan/create inputs that do not match an existing managed state. After a successful Terraform destroy, ICT deletes the complete selected workspace. Any failed or refused destroy preserves it for diagnosis and retry; a cleanup failure can leave partial local data and returns an error.
+`destroy` accepts no replacement cluster inputs other than `--state-id` (`ICT_STATE_ID`). When no Terraform state file exists, it removes the selected retained workspace directly. When state exists, it uses only the saved recovery context and values, runs Terraform destroy, and deletes the complete workspace only after that succeeds. Any Terraform, recovery, or cleanup failure preserves the workspace for diagnosis and retry.
 
 ## State, recovery, and upgrades
 
-Each lifecycle action uses `${XDG_STATE_HOME:-~/.local/state}/ict/ID`, where `ID` is the action's `--state-id` or `ICT_STATE_ID` and defaults to literal `default`. IDs are case-sensitive ASCII strings matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`; invalid, empty, path-like, hidden, Unicode, and overlength IDs are rejected. Different IDs are sibling workspaces, for example `.../ict/default` and `.../ict/slack-user-42`. A workspace holds Terraform state, provider runtime data, generated values, and recovery context with private permissions. Do not add it to source control, copy it into issue reports, or delete it while resources may exist. A successful destroy deletes only its selected workspace; failures preserve it for retry, except that failed cleanup can leave partial local data. ICT does not automatically import legacy workspaces; preserve any old recovery material as data and establish a complete current recovery context before attempting a destructive action.
+Each lifecycle action uses `${XDG_STATE_HOME:-~/.local/state}/ict/ID`, where `ID` is the action's `--state-id` or `ICT_STATE_ID` and defaults to literal `default`. IDs are case-sensitive ASCII strings matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`; invalid, empty, path-like, hidden, Unicode, and overlength IDs are rejected. Different IDs are sibling workspaces, for example `.../ict/default` and `.../ict/slack-user-42`. A state ID is one-shot: once create reserves its workspace, every later create for that ID fails until explicit `ict destroy` removes it. A workspace holds Terraform state, provider runtime data, generated values, recovery context, and the sensitive saved plan with private permissions. Terraform state is authoritative for managed resources. Do not add workspaces to source control, copy them into issue reports, or delete them while resources may exist. Failed initialization, planning, or apply attempts remain in `ict list` for diagnosis and must also be removed with `ict destroy`.
 
-`ict list` and `ict ls` are the same read-only workspace inventory. They print valid immediate real-directory IDs in lexical order, one ID per line. Empty plan-only workspaces are included without inspecting Terraform state; files, symlinks, invalid names, and nested directories are ignored. If the ICT state root is absent, the command prints nothing and does not create it.
+`ict list` and `ict ls` are the same read-only workspace inventory. They print valid immediate real-directory IDs in lexical order, one ID per line. Retained failed create attempts are included without inspecting Terraform state; files, symlinks, invalid names, and nested directories are ignored. If the ICT state root is absent, the command prints nothing and does not create it.
 
-Each ICT binary materializes its embedded Terraform files into that workspace. A newer binary can therefore change the Terraform configuration applied to existing state. After every upgrade, run and review `ict plan` before `create`; do not assume an upgrade is behaviorally neutral.
+Each ICT binary materializes its embedded Terraform files into that workspace. A newer binary can therefore change the Terraform configuration used by a later destroy; do not assume an upgrade is behaviorally neutral.

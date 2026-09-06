@@ -1,14 +1,42 @@
 package prompt
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestConfirmAcceptsOnlyLiteralYes(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  bool
+	}{
+		{input: "yes\n", want: true},
+		{input: "Yes\n", want: false},
+		{input: "yes please\n", want: false},
+	} {
+		var output bytes.Buffer
+		got, err := Confirm(strings.NewReader(test.input), &output)
+		if err != nil || got != test.want || !strings.Contains(output.String(), "Enter a value") {
+			t.Fatalf("Confirm(%q) = %t, %v, %q", test.input, got, err, output.String())
+		}
+	}
+}
+
+func TestConfirmReportsInputFailures(t *testing.T) {
+	for _, input := range []string{"", "yes"} {
+		if _, err := Confirm(strings.NewReader(input), io.Discard); err == nil {
+			t.Fatalf("Confirm(%q) succeeded", input)
+		}
+	}
+}
 
 func TestSelectWithLoaderStartsFzfBeforeLoading(t *testing.T) {
 	bin := t.TempDir()

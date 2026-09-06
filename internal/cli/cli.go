@@ -15,14 +15,13 @@ import (
 
 // CLI is the root command grammar.
 type CLI struct {
-	Plan    VPCCommand    `cmd:"" help:"Create a non-mutating Terraform plan."`
-	Create  VPCCommand    `cmd:"" help:"Create or safely resume a cluster."`
+	Create  VPCCommand    `cmd:"" help:"Review and create a new cluster."`
 	Destroy Destroy       `cmd:"" help:"Destroy only the currently managed cluster."`
 	List    ListCommand   `cmd:"" aliases:"ls" help:"List known Terraform state workspaces."`
 	Config  ConfigCommand `cmd:"" help:"Inspect effective configuration."`
 }
 
-// VPCCommand contains the transient inputs shared by plan and create.
+// VPCCommand contains the transient inputs for create.
 type VPCCommand struct {
 	StateID                        string   `name:"state-id" help:"Terraform state workspace identifier." env:"ICT_STATE_ID" default:"default"`
 	Config                         string   `help:"Target configuration file." env:"ICT_CONFIG"`
@@ -52,6 +51,7 @@ type VPCCommand struct {
 	WorkerCount                    int      `help:"Worker count (default: 1 for Kubernetes, 2 for OpenShift)." env:"ICT_WORKER_COUNT"`
 	Owner                          string   `help:"Owner used when generating a name." env:"ICT_OWNER"`
 	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
+	AutoApprove                    bool     `help:"Apply without interactive approval." env:"ICT_AUTO_APPROVE"`
 }
 
 // Destroy deliberately accepts no replacement cluster inputs.
@@ -113,18 +113,16 @@ type Runner struct {
 
 // Run dispatches the selected command.
 func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
-	return (Runner{}).Run(ctx, parsed, command)
+	runner := Runner{}
+	if err := runner.Run(ctx, parsed, command); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Run dispatches the selected command through its appropriate runner.
 func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 	switch parsed.Command() {
-	case "plan":
-		runner, err := r.lifecycle(command.Plan.StateID)
-		if err != nil {
-			return err
-		}
-		return runner.Plan(ctx, command.Plan.inputs())
 	case "create":
 		runner, err := r.lifecycle(command.Create.StateID)
 		if err != nil {
@@ -183,5 +181,5 @@ func (r Runner) lifecycle(stateID string) (workflow.Runner, error) {
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Name: c.Name, AutoApprove: c.AutoApprove}
 }

@@ -38,9 +38,14 @@ var (
 	hostProfilePattern      = regexp.MustCompile(`^[a-z][a-z0-9-]*[0-9]x[0-9]+$`)
 	vlanPattern             = regexp.MustCompile(`^[0-9]+$`)
 	versionPattern          = regexp.MustCompile(`^([0-9]+)\.([0-9]+)(?:\.[0-9]+)?(?:_openshift)?$`)
+
+	errSatelliteSSHPublicKeyRequired = errors.New("Satellite SSH public key is required")
+	errInvalidSatelliteSSHPublicKey  = errors.New("invalid Satellite SSH public key")
+	errSatelliteSSHPublicKeyEmpty    = errors.New("Satellite SSH public key is empty")
+	errIncompleteRecoveryContext     = errors.New("incomplete or invalid saved context; cannot safely destroy")
 )
 
-// Inputs are transient plan/create options.
+// Inputs are transient create options.
 type Inputs struct {
 	ConfigPath                     string
 	Target                         string
@@ -69,6 +74,7 @@ type Inputs struct {
 	WorkerCount                    int
 	Owner                          string
 	Name                           string
+	AutoApprove                    bool
 }
 
 // Values are the normalized values persisted in tfvars and recovery context.
@@ -162,6 +168,7 @@ type Runner struct {
 	IBMCloud    ibmcloud.Runner
 	Workspace   string
 	Environ     []string
+	Stdin       io.Reader
 	Stdout      io.Writer
 	Stderr      io.Writer
 	Terminal    func() bool
@@ -236,6 +243,13 @@ func (r Runner) stderr() io.Writer {
 	return os.Stderr
 }
 
+func (r Runner) stdin() io.Reader {
+	if r.Stdin != nil {
+		return r.Stdin
+	}
+	return os.Stdin
+}
+
 func (r Runner) terminal() bool {
 	if r.Terminal != nil {
 		return r.Terminal()
@@ -243,15 +257,8 @@ func (r Runner) terminal() bool {
 	return prompt.CanPrompt()
 }
 
-// Plan initializes and runs Terraform's non-mutating plan action.
-func (r Runner) Plan(ctx context.Context, supplied Inputs) error { return r.run(ctx, "plan", supplied) }
-
-// Create initializes and applies Terraform with explicit auto-approval.
+// Create performs a single review-and-apply lifecycle for a new workspace.
 func (r Runner) Create(ctx context.Context, supplied Inputs) error {
-	return r.run(ctx, "create", supplied)
-}
-
-func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 	cfg, _, err := config.LoadDiscovered(supplied.ConfigPath)
 	if err != nil {
 		return err
@@ -265,9 +272,35 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 			return err
 		}
 	}
+	if !supplied.AutoApprove && !r.terminal() {
+		return errors.New("create requires --auto-approve or ICT_AUTO_APPROVE when standard input is not interactive")
+	}
+	recovery, err := newRecoveryContext(target, values)
+	if err != nil {
+		return err
+	}
+	tfvarsData, err := marshalJSON(values)
+	if err != nil {
+		return err
+	}
+	recoveryData, err := marshalJSON(recovery)
+	if err != nil {
+		return err
+	}
 	workspace, err := r.workspace()
 	if err != nil {
 		return err
+	}
+	if err := ictterraform.ReserveWorkspace(workspace); err != nil {
+		return err
+	}
+	contextPath := filepath.Join(workspace, ictterraform.ContextName)
+	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
+	if err := ictterraform.AtomicWrite(tfvarsPath, tfvarsData); err != nil {
+		return fmt.Errorf("write runtime values: %w", err)
+	}
+	if err := ictterraform.AtomicWrite(contextPath, recoveryData); err != nil {
+		return fmt.Errorf("write runtime values: %w", err)
 	}
 	if err := r.materialize(workspace); err != nil {
 		return err
@@ -276,47 +309,48 @@ func (r Runner) run(ctx context.Context, action string, supplied Inputs) error {
 	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
 		return err
 	}
-	managed, err := r.hasState(ctx, environment, workspace)
-	if err != nil {
-		return fmt.Errorf("inspect Terraform state: %w", err)
-	}
-	contextPath := filepath.Join(workspace, ictterraform.ContextName)
-	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
-	recovery, err := newRecoveryContext(target, values)
-	if err != nil {
+	planPath := filepath.Join(workspace, ictterraform.PlanName)
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-out="+ictterraform.PlanName, "-var-file="+tfvarsPath); err != nil {
 		return err
 	}
-	if managed {
-		if err := savedInputsMatch(tfvarsPath, contextPath, recovery); err != nil {
+	if err := os.Chmod(planPath, 0o600); err != nil {
+		return fmt.Errorf("protect saved Terraform plan: %w", err)
+	}
+	if !supplied.AutoApprove {
+		approved, err := prompt.Confirm(r.stdin(), r.stdout())
+		if err != nil {
 			return err
 		}
-	} else if err := writeJSON(tfvarsPath, values); err != nil {
-		return err
-	}
-
-	if action == "create" {
-		if !managed {
-			if err := writeJSON(contextPath, recovery); err != nil {
-				return err
+		if !approved {
+			if err := r.removeAll()(workspace); err != nil {
+				return fmt.Errorf("cleanup declined workspace %s: %w", workspace, err)
 			}
+			return nil
 		}
-		err = r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "apply", "-input=false", "-auto-approve", "-var-file="+tfvarsPath)
-		return err
 	}
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-var-file="+tfvarsPath); err != nil {
-		return err
-	}
-	if !managed {
-		return writeJSON(contextPath, recovery)
-	}
-	return nil
+	return r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "apply", "-input=false", ictterraform.PlanName)
 }
 
-// Destroy uses only saved inputs and endpoints and refuses empty state.
+func (r Runner) removeAll() func(string) error {
+	if r.RemoveAll != nil {
+		return r.RemoveAll
+	}
+	return os.RemoveAll
+}
+
+// Destroy removes a workspace with no state directly, or destroys its saved state.
 func (r Runner) Destroy(ctx context.Context) error {
 	workspace, err := r.workspace()
 	if err != nil {
 		return err
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "terraform.tfstate")); errors.Is(err, os.ErrNotExist) {
+		if err := r.removeAll()(workspace); err != nil {
+			return fmt.Errorf("cleanup workspace without Terraform state %s: %w", workspace, err)
+		}
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect Terraform state file: %w", err)
 	}
 	contextPath := filepath.Join(workspace, ictterraform.ContextName)
 	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
@@ -339,42 +373,16 @@ func (r Runner) Destroy(ctx context.Context) error {
 			return err
 		}
 	}
-	managed, err := r.hasState(ctx, environment, workspace)
-	if err != nil {
-		return fmt.Errorf("inspect Terraform state: %w", err)
-	}
-	if !managed {
-		return errors.New("Terraform state has no managed resources; refusing destroy")
-	}
 	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
 		return err
 	}
 	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "destroy", "-input=false", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
 		return err
 	}
-	removeAll := os.RemoveAll
-	if r.RemoveAll != nil {
-		removeAll = r.RemoveAll
-	}
-	if err := removeAll(workspace); err != nil {
+	if err := r.removeAll()(workspace); err != nil {
 		return fmt.Errorf("cleanup destroyed workspace %s: %w", workspace, err)
 	}
 	return nil
-}
-
-func (r Runner) hasState(ctx context.Context, environ []string, workspace string) (bool, error) {
-	statePath := filepath.Join(workspace, "terraform.tfstate")
-	if _, err := os.Stat(statePath); errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
-		return false, fmt.Errorf("inspect Terraform state file: %w", err)
-	}
-
-	output, err := r.terraform().Output(ctx, environ, "terraform", "-chdir="+workspace, "state", "list")
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(string(output)) != "", nil
 }
 
 func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs) (Values, config.ResolvedTarget, error) {
@@ -618,13 +626,17 @@ func (e sshPublicKeyReadError) Unwrap() error { return e.cause }
 
 func readSSHPublicKey(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", errors.New("Satellite SSH public key is required")
+		return "", errSatelliteSSHPublicKeyRequired
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		return "", sshPublicKeyReadError{cause: err}
 	}
-	return parseSSHPublicKey(string(contents))
+	key, err := parseSSHPublicKey(string(contents))
+	if err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 func parseSSHPublicKey(contents string) (string, error) {
@@ -635,19 +647,20 @@ func parseSSHPublicKey(contents string) (string, error) {
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 || !supportedSSHPublicKeyType(fields[0]) {
-			return "", errors.New("invalid Satellite SSH public key")
+			return "", errInvalidSatelliteSSHPublicKey
 		}
 		encoded, err := base64.StdEncoding.DecodeString(fields[1])
 		if err != nil || len(encoded) < 4 {
-			return "", errors.New("invalid Satellite SSH public key")
+			return "", errInvalidSatelliteSSHPublicKey
 		}
 		length := int(binary.BigEndian.Uint32(encoded[:4]))
 		if length >= len(encoded)-4 || string(encoded[4:4+length]) != fields[0] {
-			return "", errors.New("invalid Satellite SSH public key")
+			return "", errInvalidSatelliteSSHPublicKey
 		}
-		return strings.Join(fields, " "), nil
+		normalized := strings.Join(fields, " ")
+		return normalized, nil
 	}
-	return "", errors.New("Satellite SSH public key is empty")
+	return "", errSatelliteSSHPublicKeyEmpty
 }
 
 func supportedSSHPublicKeyType(value string) bool {
@@ -1151,7 +1164,8 @@ func randomSuffix() (string, error) {
 	if _, err := cryptorand.Read(bytes); err != nil {
 		return "", fmt.Errorf("generate cluster name suffix: %w", err)
 	}
-	return hex.EncodeToString(bytes), nil
+	suffix := hex.EncodeToString(bytes)
+	return suffix, nil
 }
 func truncate(value string, length int) string {
 	if len(value) > length {
@@ -1165,7 +1179,8 @@ func marshalJSON(value any) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal runtime values: %w", err)
 	}
-	return append(data, '\n'), nil
+	data = append(data, '\n')
+	return data, nil
 }
 
 func writeJSON(path string, value any) error {
@@ -1272,7 +1287,7 @@ func emptyValues(values Values, provider string) bool {
 }
 
 func incompleteRecoveryContextError() error {
-	return errors.New("incomplete or invalid saved context; cannot safely destroy")
+	return errIncompleteRecoveryContext
 }
 
 func savedInputsMatch(tfvarsPath, contextPath string, expected RecoveryContext) error {
