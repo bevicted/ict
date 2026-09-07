@@ -28,6 +28,11 @@ run "satellite_hosts_use_three_zones_and_default_worker_pool" {
     condition     = ibm_is_instance.satellite_control_plane[0].zone == "us-south-1" && ibm_is_instance.satellite_control_plane[1].zone == "us-south-2" && ibm_is_instance.satellite_control_plane[2].zone == "us-south-3" && contains(ibm_satellite_host.satellite_worker[0].labels, "satellite-role:cluster-worker")
     error_message = "Satellite control-plane and worker hosts must retain the selected zones and worker label."
   }
+
+  assert {
+    condition     = ibm_is_vpc.satellite[0].name == "synthetic-satellite-satellite-vpc" && ibm_is_subnet.satellite[0].name == "synthetic-satellite-satellite-subnet-1" && ibm_is_public_gateway.satellite[0].name == "synthetic-satellite-satellite-gateway-1" && ibm_is_ssh_key.satellite[0].name == "synthetic-satellite-satellite-ssh" && ibm_satellite_location.satellite[0].location == "synthetic-satellite-satellite" && ibm_is_instance.satellite_control_plane[0].name == "synthetic-satellite-satellite-control-1" && ibm_is_instance.satellite_worker[0].name == "synthetic-satellite-satellite-worker-1" && ibm_satellite_cluster.satellite[0].name == "synthetic-satellite"
+    error_message = "Every created Satellite resource name must derive from the cluster name."
+  }
 }
 
 run "satellite_reuse_maps_unordered_networking_and_suppresses_control_plane" {

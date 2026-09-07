@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,67 @@ func actionNames(calls [][]string) []string {
 		result = append(result, call[1])
 	}
 	return result
+}
+
+func TestResolveNamePrefixingAndLimits(t *testing.T) {
+	now := time.Date(2026, 9, 7, 11, 29, 13, 0, time.UTC)
+	runner := Runner{Environ: []string{"USER=Fallback Owner"}, Now: func() time.Time { return now }, Suffix: func() string { return "ab12cd34" }}
+
+	name, err := runner.resolveName(Inputs{Name: "unchanged-name"}, 32)
+	if err != nil || name != "unchanged-name" {
+		t.Fatalf("explicit no-prefix name = %q, %v", name, err)
+	}
+	name, err = runner.resolveName(Inputs{Owner: "Explicit Owner"}, 32)
+	if err != nil || name != "explicit-o-260907112913-ab12cd34" {
+		t.Fatalf("owner generated name = %q, %v", name, err)
+	}
+	name, err = runner.resolveName(Inputs{}, 32)
+	if err != nil || name != "fallback-o-260907112913-ab12cd34" {
+		t.Fatalf("environment generated name = %q, %v", name, err)
+	}
+	name, err = (Runner{Environ: []string{}, Now: func() time.Time { return now }, Suffix: func() string { return "ab12cd34" }}).resolveName(Inputs{}, 32)
+	if err != nil || name != "user-260907112913-ab12cd34" {
+		t.Fatalf("default generated name = %q, %v", name, err)
+	}
+
+	for _, test := range []struct {
+		provider string
+		limit    int
+		pattern  *regexp.Regexp
+	}{
+		{provider: "VPC", limit: 32, pattern: vpcClusterPattern},
+		{provider: "Classic", limit: 35, pattern: classicClusterPattern},
+		{provider: "Satellite", limit: 44, pattern: satelliteClusterPattern},
+	} {
+		t.Run(test.provider, func(t *testing.T) {
+			name, err := runner.resolveName(Inputs{Owner: "ignored-owner", Prefix: "SERVITOR"}, test.limit)
+			if err != nil || name != "servitor-260907112913-ab12cd34" || len(name) > test.limit || !test.pattern.MatchString(name) {
+				t.Fatalf("generated prefixed name = %q, %v", name, err)
+			}
+			name, err = runner.resolveName(Inputs{Prefix: "SERVITOR", Name: "Release Candidate With A Very Long Name"}, test.limit)
+			want := "servitor-" + truncate("release-candidate-with-a-very-long-name", test.limit-len("servitor")-1)
+			if err != nil || name != want || len(name) != test.limit || !test.pattern.MatchString(name) {
+				t.Fatalf("explicit prefixed name = %q, %v; want %q", name, err, want)
+			}
+		})
+	}
+
+	name, err = runner.resolveName(Inputs{Prefix: "ClassicPrefix"}, 35)
+	if err != nil || name != "classicprefix-260907112913-ab12cd34" {
+		t.Fatalf("long generated prefix = %q, %v", name, err)
+	}
+
+	for _, prefix := range []string{"---", "123-servitor"} {
+		if _, err := runner.resolveName(Inputs{Prefix: prefix}, 32); err == nil {
+			t.Fatalf("invalid prefix %q was accepted", prefix)
+		}
+	}
+	if _, err := runner.resolveName(Inputs{Prefix: strings.Repeat("a", 11)}, 32); err == nil {
+		t.Fatal("oversized generated prefix was accepted")
+	}
+	if _, err := runner.resolveName(Inputs{Prefix: strings.Repeat("a", 32), Name: "cluster"}, 32); err == nil {
+		t.Fatal("prefix with no explicit-name room was accepted")
+	}
 }
 
 func TestCreateSavesReviewsAndAppliesExactPlan(t *testing.T) {

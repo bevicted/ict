@@ -73,6 +73,7 @@ type Inputs struct {
 	SatelliteWorkerOperatingSystem string
 	WorkerCount                    int
 	Owner                          string
+	Prefix                         string
 	Name                           string
 	AutoApprove                    bool
 	ConfirmStdin                   bool
@@ -454,7 +455,11 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 	if workers < minimumWorkers {
 		return Values{}, config.ResolvedTarget{}, fmt.Errorf("worker count must be at least %d for %s", minimumWorkers, supplied.Platform)
 	}
-	name, err := r.resolveName(supplied)
+	nameLimit, err := clusterNameLimit(provider)
+	if err != nil {
+		return Values{}, config.ResolvedTarget{}, err
+	}
+	name, err := r.resolveName(supplied, nameLimit)
 	if err != nil {
 		return Values{}, config.ResolvedTarget{}, err
 	}
@@ -704,10 +709,37 @@ func newRecoveryContext(target config.ResolvedTarget, values Values) (RecoveryCo
 	}, nil
 }
 
-func (r Runner) resolveName(supplied Inputs) (string, error) {
-	name := supplied.Name
-	if name != "" {
-		return name, nil
+func (r Runner) resolveName(supplied Inputs, limit int) (string, error) {
+	if supplied.Prefix != "" {
+		prefix, err := normalizePrefix(supplied.Prefix)
+		if err != nil {
+			return "", err
+		}
+		if supplied.Name != "" {
+			name, err := normalizeName(supplied.Name)
+			if err != nil {
+				return "", err
+			}
+			return prefixedName(prefix, name, limit)
+		}
+		if len(prefix)+generatedNameSuffixLength > limit {
+			return "", fmt.Errorf("prefix %q leaves no room for a generated name", prefix)
+		}
+		now := time.Now().UTC()
+		if r.Now != nil {
+			now = r.Now().UTC()
+		}
+		if r.Suffix != nil {
+			return generatedPrefixedName(prefix, now, r.Suffix()), nil
+		}
+		suffix, err := randomSuffix()
+		if err != nil {
+			return "", err
+		}
+		return generatedPrefixedName(prefix, now, suffix), nil
+	}
+	if supplied.Name != "" {
+		return supplied.Name, nil
 	}
 	ownerInput := supplied.Owner
 	if ownerInput == "" {
@@ -732,6 +764,48 @@ func (r Runner) resolveName(supplied Inputs) (string, error) {
 		return "", err
 	}
 	return generatedName(owner, now, suffix), nil
+}
+
+const generatedNameSuffixLength = len("-060102150405-01234567")
+
+func clusterNameLimit(provider config.Provider) (int, error) {
+	switch provider {
+	case config.ProviderVPCGen2:
+		return 32, nil
+	case config.ProviderClassic:
+		return 35, nil
+	case config.ProviderSatellite:
+		return 44, nil
+	default:
+		return 0, fmt.Errorf("provider %q is not supported by this lifecycle", provider)
+	}
+}
+
+func normalizePrefix(value string) (string, error) {
+	prefix, err := normalizeOwner(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid prefix: %w", err)
+	}
+	if prefix[0] >= '0' && prefix[0] <= '9' {
+		return "", fmt.Errorf("prefix %q must begin with a letter", value)
+	}
+	return prefix, nil
+}
+
+func normalizeName(value string) (string, error) {
+	name, err := normalizeOwner(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid name: %w", err)
+	}
+	return name, nil
+}
+
+func prefixedName(prefix, name string, limit int) (string, error) {
+	available := limit - len(prefix) - 1
+	if available < 1 {
+		return "", fmt.Errorf("prefix %q leaves no room for an explicit name", prefix)
+	}
+	return prefix + "-" + truncate(name, available), nil
 }
 
 func (r Runner) requirePrompt(fields []string) error {
@@ -1159,7 +1233,11 @@ func normalizeOwner(value string) (string, error) {
 	return value, nil
 }
 func generatedName(owner string, now time.Time, suffix string) string {
-	return fmt.Sprintf("%s-%s-%s", truncate(owner, 10), now.UTC().Format("060102150405"), suffix)
+	return generatedPrefixedName(truncate(owner, 10), now, suffix)
+}
+
+func generatedPrefixedName(prefix string, now time.Time, suffix string) string {
+	return fmt.Sprintf("%s-%s-%s", prefix, now.UTC().Format("060102150405"), suffix)
 }
 func randomSuffix() (string, error) {
 	bytes := make([]byte, 4)

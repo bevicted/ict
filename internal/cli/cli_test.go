@@ -14,11 +14,11 @@ import (
 )
 
 func TestCreateGrammarParsesApprovalAndRejectsPlan(t *testing.T) {
-	parsed, command, err := Parse([]string{"create", "fixture", "--config", "config.yaml", "--name", "fixture-cluster", "--confirm-stdin"})
+	parsed, command, err := Parse([]string{"create", "fixture", "--config", "config.yaml", "--prefix", "servitor", "--name", "fixture-cluster", "--confirm-stdin"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "create <state-id>" || command.Create.Config != "config.yaml" || command.Create.Name != "fixture-cluster" || !command.Create.ConfirmStdin {
+	if parsed.Command() != "create <state-id>" || command.Create.Config != "config.yaml" || command.Create.Prefix != "servitor" || command.Create.Name != "fixture-cluster" || !command.Create.ConfirmStdin {
 		t.Fatalf("create = %#v", command.Create)
 	}
 	t.Setenv("ICT_AUTO_APPROVE", "true")
