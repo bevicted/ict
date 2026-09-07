@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -60,8 +61,10 @@ type Destroy struct {
 	StateID string `arg:"" name:"state-id" help:"Terraform state workspace identifier."`
 }
 
-// ListCommand deliberately accepts no options.
-type ListCommand struct{}
+// ListCommand selects the human or machine-readable workspace inventory.
+type ListCommand struct {
+	Output string `help:"Output format (json)."`
+}
 
 // ConfigCommand contains configuration inspection and mutation commands.
 type ConfigCommand struct {
@@ -137,7 +140,7 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 		}
 		return runner.Destroy(ctx)
 	case "list":
-		return r.list()
+		return r.list(command.List.Output)
 	case "config show":
 		return r.Config.Show(command.Config.Show.Config)
 	case "config get <path>":
@@ -151,7 +154,21 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 	}
 }
 
-func (r Runner) list() error {
+func (r Runner) list(output string) error {
+	if output == "json" {
+		inventory, err := ictterraform.ListWorkspaceInventory()
+		if err != nil {
+			return err
+		}
+		if err := json.NewEncoder(r.stdout()).Encode(inventory); err != nil {
+			return fmt.Errorf("write JSON state workspace list: %w", err)
+		}
+		return nil
+	}
+	if output != "" {
+		return fmt.Errorf("unsupported list output %q", output)
+	}
+
 	workspaces, err := ictterraform.ListWorkspaces()
 	if err != nil {
 		return err

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,54 @@ func TestListAliasesProduceIdenticalOutput(t *testing.T) {
 		if got, want := output.String(), "alpha\nfailed\nzeta\n"; got != want {
 			t.Fatalf("output = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestListJSONInventoryAndUnsupportedOutput(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state home")
+	root := filepath.Join(stateHome, "ict")
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	for _, name := range []string{"zeta", "alpha"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	parsed, command, err := Parse([]string{"list", "--output", "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := (Runner{Stdout: &output}).Run(context.Background(), parsed, command); err != nil {
+		t.Fatal(err)
+	}
+	var inventory struct {
+		Version    int    `json:"version"`
+		StateRoot  string `json:"state_root"`
+		Workspaces []struct {
+			ID   string `json:"id"`
+			Path string `json:"path"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &inventory); err != nil {
+		t.Fatalf("list JSON = %q: %v", output.String(), err)
+	}
+	if inventory.Version != 1 || !filepath.IsAbs(inventory.StateRoot) || len(inventory.Workspaces) != 2 {
+		t.Fatalf("inventory = %#v", inventory)
+	}
+	for index, wantID := range []string{"alpha", "zeta"} {
+		workspace := inventory.Workspaces[index]
+		if workspace.ID != wantID || workspace.Path != filepath.Join(inventory.StateRoot, wantID) || !filepath.IsAbs(workspace.Path) {
+			t.Fatalf("workspace %d = %#v", index, workspace)
+		}
+	}
+
+	parsed, command, err = Parse([]string{"list", "--output", "yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (Runner{}).Run(context.Background(), parsed, command); err == nil || err.Error() != `unsupported list output "yaml"` {
+		t.Fatalf("unsupported output error = %v", err)
 	}
 }
 

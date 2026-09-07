@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 )
 
 //go:embed assets/main.tf assets/variables.tf assets/.terraform.lock.hcl
@@ -24,7 +25,7 @@ const DefaultStateID = "default"
 
 var stateIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// StateRoot returns the directory containing ICT state workspaces.
+// StateRoot returns the canonical absolute directory containing ICT state workspaces.
 func StateRoot() (string, error) {
 	stateHome := os.Getenv("XDG_STATE_HOME")
 	if stateHome == "" {
@@ -34,7 +35,10 @@ func StateRoot() (string, error) {
 		}
 		stateHome = filepath.Join(home, ".local", "state")
 	}
-	root := filepath.Join(stateHome, "ict")
+	root, err := canonicalPath(filepath.Join(stateHome, "ict"))
+	if err != nil {
+		return "", fmt.Errorf("resolve Terraform state root: %w", err)
+	}
 	return root, nil
 }
 
@@ -49,6 +53,19 @@ func Workspace(stateID string) (string, error) {
 	}
 	workspace := filepath.Join(root, stateID)
 	return workspace, nil
+}
+
+// WorkspaceInventory is the versioned machine-readable workspace contract.
+type WorkspaceInventory struct {
+	Version    int                 `json:"version"`
+	StateRoot  string              `json:"state_root"`
+	Workspaces []WorkspaceLocation `json:"workspaces"`
+}
+
+// WorkspaceLocation identifies one validated Terraform workspace.
+type WorkspaceLocation struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
 }
 
 // ListWorkspaces returns the valid immediate workspace directories in lexical order.
@@ -73,6 +90,57 @@ func ListWorkspaces() ([]string, error) {
 		workspaces = append(workspaces, entry.Name())
 	}
 	return workspaces, nil
+}
+
+// ListWorkspaceInventory returns validated workspace locations for machine use.
+func ListWorkspaceInventory() (WorkspaceInventory, error) {
+	root, err := StateRoot()
+	if err != nil {
+		return WorkspaceInventory{}, err
+	}
+	inventory := WorkspaceInventory{Version: 1, StateRoot: root, Workspaces: make([]WorkspaceLocation, 0)}
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return inventory, nil
+	}
+	if err != nil {
+		return WorkspaceInventory{}, fmt.Errorf("read Terraform state root: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if !stateIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return WorkspaceInventory{}, fmt.Errorf("invalid Terraform workspace %q: symbolic links are not permitted", entry.Name())
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return WorkspaceInventory{}, fmt.Errorf("inspect Terraform workspace %q: %w", entry.Name(), err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if _, exists := seen[entry.Name()]; exists {
+			return WorkspaceInventory{}, fmt.Errorf("duplicate Terraform workspace ID %q", entry.Name())
+		}
+
+		path := filepath.Join(root, entry.Name())
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return WorkspaceInventory{}, fmt.Errorf("resolve Terraform workspace %q: %w", entry.Name(), err)
+		}
+		if resolved != path {
+			return WorkspaceInventory{}, fmt.Errorf("invalid Terraform workspace %q: resolved path escapes state root", entry.Name())
+		}
+		seen[entry.Name()] = struct{}{}
+		inventory.Workspaces = append(inventory.Workspaces, WorkspaceLocation{ID: entry.Name(), Path: path})
+	}
+	sort.Slice(inventory.Workspaces, func(i, j int) bool {
+		return inventory.Workspaces[i].ID < inventory.Workspaces[j].ID
+	})
+	return inventory, nil
 }
 
 // ReserveWorkspace atomically creates a private, previously absent workspace.
@@ -125,6 +193,39 @@ func AtomicWrite(path string, contents []byte) error {
 		return fmt.Errorf("write runtime file: %w", err)
 	}
 	return nil
+}
+
+func canonicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("make path absolute: %w", err)
+	}
+	return canonicalExistingPath(absolute)
+}
+
+func canonicalExistingPath(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if _, lstatErr := os.Lstat(path); lstatErr == nil {
+		return "", err
+	} else if !errors.Is(lstatErr, fs.ErrNotExist) {
+		return "", lstatErr
+	}
+
+	parent := filepath.Dir(path)
+	if parent == path {
+		return "", err
+	}
+	resolvedParent, err := canonicalExistingPath(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedParent, filepath.Base(path)), nil
 }
 
 func atomicWrite(path string, contents []byte) error {

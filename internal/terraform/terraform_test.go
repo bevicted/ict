@@ -17,7 +17,11 @@ func TestWorkspaceUsesStateRootAndStateID(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := filepath.Join(stateHome, "ict", stateID)
+			root, err := StateRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := filepath.Join(root, stateID)
 			if workspace != want {
 				t.Fatalf("workspace = %q, want %q", workspace, want)
 			}
@@ -71,7 +75,11 @@ func TestWorkspaceFallsBackToLocalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, ".local", "state", "ict", DefaultStateID)
+	root, err := StateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, DefaultStateID)
 	if workspace != want {
 		t.Fatalf("workspace = %q, want %q", workspace, want)
 	}
@@ -104,6 +112,98 @@ func TestListWorkspacesSortsAndFiltersEntries(t *testing.T) {
 	if got, want := strings.Join(workspaces, ","), "alpha,plan-only,zeta"; got != want {
 		t.Fatalf("workspaces = %q, want %q", got, want)
 	}
+}
+
+func TestStateRootCanonicalizesRelativeStateHome(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	t.Setenv("XDG_STATE_HOME", "state home")
+
+	root, err := StateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalWorkingDirectory, err := filepath.EvalSymlinks(workingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalWorkingDirectory, "state home", "ict")
+	if root != want || !filepath.IsAbs(root) {
+		t.Fatalf("state root = %q, want absolute %q", root, want)
+	}
+}
+
+func TestListWorkspaceInventoryReturnsCanonicalSortedLocations(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state home")
+	root := filepath.Join(stateHome, "ict")
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	for _, name := range []string{"zeta", "alpha"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	inventory, err := ListWorkspaceInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory.Version != 1 || !filepath.IsAbs(inventory.StateRoot) {
+		t.Fatalf("inventory = %#v", inventory)
+	}
+	if got, want := len(inventory.Workspaces), 2; got != want {
+		t.Fatalf("workspace count = %d, want %d", got, want)
+	}
+	for index, wantID := range []string{"alpha", "zeta"} {
+		workspace := inventory.Workspaces[index]
+		if workspace.ID != wantID || workspace.Path != filepath.Join(inventory.StateRoot, wantID) || !filepath.IsAbs(workspace.Path) {
+			t.Fatalf("workspace %d = %#v", index, workspace)
+		}
+	}
+}
+
+func TestListWorkspaceInventoryMissingRootIsEmpty(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+
+	inventory, err := ListWorkspaceInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory.Version != 1 || !filepath.IsAbs(inventory.StateRoot) || len(inventory.Workspaces) != 0 {
+		t.Fatalf("inventory = %#v", inventory)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "ict")); !os.IsNotExist(err) {
+		t.Fatalf("ListWorkspaceInventory created the state root: %v", err)
+	}
+}
+
+func TestListWorkspaceInventoryRejectsInvalidLocations(t *testing.T) {
+	t.Run("workspace symlink", func(t *testing.T) {
+		stateHome := t.TempDir()
+		root := filepath.Join(stateHome, "ict")
+		t.Setenv("XDG_STATE_HOME", stateHome)
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, "escape")); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := ListWorkspaceInventory(); err == nil || !strings.Contains(err.Error(), "symbolic links") {
+			t.Fatalf("ListWorkspaceInventory error = %v", err)
+		}
+	})
+	t.Run("state root file", func(t *testing.T) {
+		stateHome := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", stateHome)
+		if err := os.WriteFile(filepath.Join(stateHome, "ict"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := ListWorkspaceInventory(); err == nil || !strings.Contains(err.Error(), "read Terraform state root") {
+			t.Fatalf("ListWorkspaceInventory error = %v", err)
+		}
+	})
 }
 
 func TestListWorkspacesMissingRootIsEmptyAndNonCreating(t *testing.T) {
