@@ -16,7 +16,7 @@ run "vpc_cluster_name_is_within_api_limit" {
   }
 
   assert {
-    condition     = ibm_container_vpc_cluster.cluster[0].name == "synthetic-vpc-name-0000000000001" && length(ibm_container_vpc_cluster.cluster[0].name) == 32 && ibm_is_vpc.cluster[0].name == "synthetic-vpc-name-0000000000001-vpc" && ibm_is_subnet.cluster[0].name == "synthetic-vpc-name-0000000000001-subnet" && ibm_is_public_gateway.cluster[0].name == "synthetic-vpc-name-0000000000001-gateway"
-    error_message = "VPC cluster names must fit the 32-character API limit and generated resources must inherit the cluster name."
+    condition     = ibm_container_vpc_cluster.cluster[0].name == "synthetic-vpc-name-0000000000001" && length(ibm_container_vpc_cluster.cluster[0].name) == 32 && ibm_container_vpc_cluster.cluster[0].timeouts.create == "90m" && ibm_is_vpc.cluster[0].name == "synthetic-vpc-name-0000000000001-vpc" && ibm_is_subnet.cluster[0].name == "synthetic-vpc-name-0000000000001-subnet" && ibm_is_public_gateway.cluster[0].name == "synthetic-vpc-name-0000000000001-gateway"
+    error_message = "VPC cluster names must fit the 32-character API limit, use the 90-minute create timeout, and pass the cluster name to generated resources."
   }
 }

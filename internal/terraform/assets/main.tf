@@ -192,6 +192,10 @@ resource "ibm_container_vpc_cluster" "cluster" {
   resource_group_id = data.ibm_resource_group.selected.id
   wait_till         = "OneWorkerNodeReady"
 
+  timeouts {
+    create = "90m"
+  }
+
   zones {
     name      = var.zone
     subnet_id = local.effective_subnet_id
