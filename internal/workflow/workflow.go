@@ -309,11 +309,11 @@ func (r Runner) Create(ctx context.Context, supplied Inputs) error {
 		return err
 	}
 	environment := r.environment(target.Environment())
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false", "-no-color"); err != nil {
 		return err
 	}
 	planPath := filepath.Join(workspace, ictterraform.PlanName)
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-out="+ictterraform.PlanName, "-var-file="+tfvarsPath); err != nil {
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-no-color", "-out="+ictterraform.PlanName, "-var-file="+tfvarsPath); err != nil {
 		return err
 	}
 	if err := os.Chmod(planPath, 0o600); err != nil {
@@ -331,7 +331,7 @@ func (r Runner) Create(ctx context.Context, supplied Inputs) error {
 			return nil
 		}
 	}
-	return r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "apply", "-input=false", ictterraform.PlanName)
+	return r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "apply", "-input=false", "-no-color", ictterraform.PlanName)
 }
 
 func (r Runner) removeAll() func(string) error {
@@ -376,10 +376,10 @@ func (r Runner) Destroy(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false"); err != nil {
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false", "-no-color"); err != nil {
 		return err
 	}
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "destroy", "-input=false", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "destroy", "-input=false", "-no-color", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
 		return err
 	}
 	if err := r.removeAll()(workspace); err != nil {

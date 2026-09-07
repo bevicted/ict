@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -155,12 +156,12 @@ func TestCreateSavesReviewsAndAppliesExactPlan(t *testing.T) {
 	if got, want := strings.Join(actionNames(fake.calls), ","), "init,plan,apply"; got != want {
 		t.Fatalf("actions = %q, want %q", got, want)
 	}
-	planCall, applyCall := strings.Join(fake.calls[1], " "), strings.Join(fake.calls[2], " ")
-	if !strings.Contains(planCall, "-out=.cluster/create.tfplan") || !strings.Contains(planCall, "-var-file="+filepath.Join(workspace, ictterraform.TFVarsName)) {
-		t.Fatalf("plan call = %q", planCall)
-	}
-	if got, want := applyCall, "-chdir="+workspace+" apply -input=false .cluster/create.tfplan"; got != want {
-		t.Fatalf("apply call = %q, want %q", got, want)
+	if got, want := fake.calls, [][]string{
+		{"-chdir=" + workspace, "init", "-input=false", "-no-color"},
+		{"-chdir=" + workspace, "plan", "-input=false", "-no-color", "-out=" + ictterraform.PlanName, "-var-file=" + filepath.Join(workspace, ictterraform.TFVarsName)},
+		{"-chdir=" + workspace, "apply", "-input=false", "-no-color", ictterraform.PlanName},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Terraform calls = %#v, want %#v", got, want)
 	}
 	info, err := os.Stat(filepath.Join(workspace, ictterraform.PlanName))
 	if err != nil || info.Mode().Perm() != 0o600 {
@@ -458,8 +459,11 @@ func TestDestroyUsesStateAsAuthority(t *testing.T) {
 		if err := runner.Destroy(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if got, want := strings.Join(actionNames(fake.calls), ","), "init,destroy"; got != want {
-			t.Fatalf("destroy actions = %q, want %q", got, want)
+		if got, want := fake.calls, [][]string{
+			{"-chdir=" + workspace, "init", "-input=false", "-no-color"},
+			{"-chdir=" + workspace, "destroy", "-input=false", "-no-color", "-auto-approve", "-var-file=" + filepath.Join(workspace, ictterraform.TFVarsName)},
+		}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("Terraform calls = %#v, want %#v", got, want)
 		}
 		if _, err := os.Stat(workspace); !os.IsNotExist(err) {
 			t.Fatalf("workspace remains: %v", err)
