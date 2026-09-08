@@ -13,7 +13,7 @@ import (
 	"github.com/bevicted/ict/internal/workflow"
 )
 
-func TestCreateGrammarParsesApprovalAndRejectsPlan(t *testing.T) {
+func TestCreateAndPlanGrammar(t *testing.T) {
 	parsed, command, err := Parse([]string{"create", "fixture", "--config", "config.yaml", "--prefix", "servitor", "--name", "fixture-cluster", "--confirm-stdin"})
 	if err != nil {
 		t.Fatal(err)
@@ -29,8 +29,19 @@ func TestCreateGrammarParsesApprovalAndRejectsPlan(t *testing.T) {
 	if !command.Create.AutoApprove {
 		t.Fatalf("create = %#v", command.Create)
 	}
-	if _, _, err := Parse([]string{"plan"}); err == nil {
-		t.Fatal("plan command was accepted")
+	backendPath := filepath.Join(t.TempDir(), "backend.json")
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	parsed, command, err = Parse([]string{"plan", "fixture", "--config", "config.yaml", "--provider", "vpc-gen2", "--subnet-id", "subnet-existing", "--backend-config", backendPath, "--result-file", resultPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Command() != "plan <state-id>" || command.Plan.StateID != "fixture" || command.Plan.Config != "config.yaml" || command.Plan.Provider != "vpc-gen2" || strings.Join(command.Plan.SubnetIDs, ",") != "subnet-existing" || command.Plan.BackendConfig != backendPath || command.Plan.ResultFile != resultPath {
+		t.Fatalf("plan = %#v", command.Plan)
+	}
+	for _, args := range [][]string{{"plan"}, {"plan", "fixture", "--backend-config", backendPath}, {"plan", "fixture", "--backend-config", backendPath, "--result-file", resultPath, "--auto-approve"}, {"plan", "fixture", "--backend-config", backendPath, "--result-file", resultPath, "--access-key", "secret"}} {
+		if _, _, err := Parse(args); err == nil {
+			t.Errorf("Parse(%q) accepted invalid plan syntax", args)
+		}
 	}
 }
 

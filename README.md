@@ -109,7 +109,37 @@ When standard input is not a terminal, `config edit` reads the complete input an
 
 ## Lifecycle
 
-Use `create` to generate and display one Terraform plan, then apply that exact saved plan after confirmation. Each lifecycle action requires its state workspace ID as the first positional argument: `ict create ID` or `ict destroy ID`. Interactive `create` applies only when the response is the literal `yes`. Use `--auto-approve` or `ICT_AUTO_APPROVE=true` for non-interactive callers; without either, a non-interactive create fails before creating a workspace.
+Automation should use `plan` to resolve one cluster request and create a disposable Terraform plan without applying it. It requires the existing cluster options, an absolute `--backend-config` path, and an absolute `--result-file` path:
+
+```sh
+ict plan allocation-123 \
+  --backend-config /run/ict/backend.json \
+  --result-file /run/ict/plan-result.json \
+  --config "$HOME/.config/ict/config.yaml" \
+  --target example --provider vpc-gen2 --platform kubernetes --version 1.31 \
+  --resource-group example-resource-group --zone us-south-1 --flavor bx2.2x8
+```
+
+The backend file is strict JSON containing only non-secret COS S3 backend identity and settings. HMAC credentials remain environment variables, for example `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; do not add credentials to the file, flags, or result.
+
+```json
+{
+  "version": 1,
+  "bucket": "ict-state-bucket",
+  "key": "allocations/allocation-123.tfstate",
+  "region": "us-south",
+  "endpoint": "https://s3.us-south.cloud-object-storage.appdomain.cloud",
+  "skip_credentials_validation": true,
+  "skip_metadata_api_check": true,
+  "skip_region_validation": true,
+  "skip_requesting_account_id": true,
+  "force_path_style": true
+}
+```
+
+`plan` writes a strict versioned result with resolved values, recovery context, backend identity, and the task-local binary-plan path. It never applies or prompts. The binary plan stays in the ICT workspace and is not part of the result. `use_lockfile: true` is rejected because ICT supports Terraform 1.5+, while that S3 backend setting requires Terraform 1.10. This is the new automation path; do not rely on a local workspace being transferable between executions.
+
+`create` remains temporarily for the existing interactive lifecycle. It generates and displays one Terraform plan, then applies that exact saved plan after confirmation. Each lifecycle action requires its state workspace ID as the first positional argument: `ict create ID` or `ict destroy ID`. Interactive `create` applies only when the response is the literal `yes`. Use `--auto-approve` or `ICT_AUTO_APPROVE=true` for non-interactive callers; without either, a non-interactive create fails before creating a workspace.
 
 A supervised caller that must retain the literal confirmation can use `ict create ID --confirm-stdin` and provide `yes` followed by a newline through standard input. This does not auto-approve: only that exact response applies the saved plan. A non-yes response declines and removes the un-applied workspace; an input read failure returns an error without applying.
 

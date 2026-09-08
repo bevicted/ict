@@ -118,6 +118,15 @@ type RecoveryContext struct {
 	TFVarsSHA256                     string           `json:"tfvars_sha256"`
 }
 
+// PlanResult is the strict non-secret handoff from a disposable planning workspace.
+type PlanResult struct {
+	Version  int                        `json:"version"`
+	Values   Values                     `json:"values"`
+	Recovery RecoveryContext            `json:"recovery"`
+	Backend  ictterraform.BackendConfig `json:"backend"`
+	PlanPath string                     `json:"plan_path"`
+}
+
 // CommandRunner is the injectable Terraform subprocess seam.
 type CommandRunner interface {
 	Run(context.Context, []string, io.Writer, io.Writer, string, ...string) error
@@ -332,6 +341,73 @@ func (r Runner) Create(ctx context.Context, supplied Inputs) error {
 		}
 	}
 	return r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "apply", "-input=false", "-no-color", ictterraform.PlanName)
+}
+
+// Plan resolves inputs once, initializes the configured remote backend, and writes a disposable plan result.
+func (r Runner) Plan(ctx context.Context, supplied Inputs, backend ictterraform.BackendConfig, resultPath string) error {
+	if err := backend.Validate(); err != nil {
+		return err
+	}
+	if err := ictterraform.ValidateResultPath(resultPath); err != nil {
+		return err
+	}
+	cfg, _, err := config.LoadDiscovered(supplied.ConfigPath)
+	if err != nil {
+		return err
+	}
+	values, target, err := r.resolve(ctx, cfg, supplied)
+	if err != nil {
+		return err
+	}
+	if values.ClusterMode == "classic" {
+		if err := requireClassicCredentials(r.baseEnvironment()); err != nil {
+			return err
+		}
+	}
+	recovery, err := newRecoveryContext(target, values)
+	if err != nil {
+		return err
+	}
+	tfvarsData, err := marshalJSON(values)
+	if err != nil {
+		return err
+	}
+	workspace, err := r.workspace()
+	if err != nil {
+		return err
+	}
+	if err := ictterraform.ReserveWorkspace(workspace); err != nil {
+		return err
+	}
+	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
+	if err := ictterraform.AtomicWrite(tfvarsPath, tfvarsData); err != nil {
+		return fmt.Errorf("write runtime values: %w", err)
+	}
+	if err := writeJSON(filepath.Join(workspace, ictterraform.ContextName), recovery); err != nil {
+		return err
+	}
+	if err := r.materialize(workspace); err != nil {
+		return err
+	}
+	if err := ictterraform.MaterializeBackend(workspace); err != nil {
+		return fmt.Errorf("materialize Terraform backend: %w", err)
+	}
+	environment := r.environment(target.Environment())
+	initArgs := append([]string{"-chdir=" + workspace, "init", "-input=false", "-no-color"}, backend.InitArgs()...)
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", initArgs...); err != nil {
+		return err
+	}
+	planPath := filepath.Join(workspace, ictterraform.PlanName)
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-no-color", "-out="+ictterraform.PlanName, "-var-file="+tfvarsPath); err != nil {
+		return err
+	}
+	if err := os.Chmod(planPath, 0o600); err != nil {
+		return fmt.Errorf("protect saved Terraform plan: %w", err)
+	}
+	if err := writeJSON(resultPath, PlanResult{Version: 1, Values: values, Recovery: recovery, Backend: backend, PlanPath: planPath}); err != nil {
+		return fmt.Errorf("write plan result: %w", err)
+	}
+	return nil
 }
 
 func (r Runner) removeAll() func(string) error {
@@ -1261,6 +1337,47 @@ func marshalJSON(value any) ([]byte, error) {
 	}
 	data = append(data, '\n')
 	return data, nil
+}
+
+// ReadPlanResult strictly validates a serialized plan handoff before a later operation uses it.
+func ReadPlanResult(path string) (PlanResult, error) {
+	if err := ictterraform.ValidateResultPath(path); err != nil {
+		return PlanResult{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return PlanResult{}, fmt.Errorf("read plan result %q: %w", path, err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var result PlanResult
+	if err := decoder.Decode(&result); err != nil {
+		return PlanResult{}, fmt.Errorf("decode plan result: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return PlanResult{}, errors.New("plan result contains trailing JSON")
+	}
+	if result.Version != 1 {
+		return PlanResult{}, fmt.Errorf("unsupported plan result version %d", result.Version)
+	}
+	if err := result.Backend.Validate(); err != nil {
+		return PlanResult{}, fmt.Errorf("invalid plan result backend: %w", err)
+	}
+	if err := ictterraform.ValidateResultPath(result.PlanPath); err != nil {
+		return PlanResult{}, fmt.Errorf("invalid plan result plan path: %w", err)
+	}
+	if err := validateRecoveryForDestroy(result.Recovery); err != nil {
+		return PlanResult{}, fmt.Errorf("invalid plan result recovery: %w", err)
+	}
+	values, err := recoveryValuesFromTFVars(result.Values, result.Recovery.SatelliteSSHPublicKeyFingerprint)
+	if err != nil || !reflect.DeepEqual(values, result.Recovery.Values) {
+		return PlanResult{}, errors.New("invalid plan result values")
+	}
+	tfvars, err := marshalJSON(result.Values)
+	if err != nil || result.Recovery.TFVarsSHA256 != tfvarsSHA256(tfvars) {
+		return PlanResult{}, errors.New("invalid plan result values")
+	}
+	return result, nil
 }
 
 func writeJSON(path string, value any) error {

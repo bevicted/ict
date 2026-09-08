@@ -175,6 +175,84 @@ func TestCreateSavesReviewsAndAppliesExactPlan(t *testing.T) {
 	}
 }
 
+func TestPlanInitializesCOSBackendWithoutApplyingAndWritesStrictResult(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	backend := ictterraform.BackendConfig{
+		Version:                   1,
+		Bucket:                    "ict-state-bucket",
+		Key:                       "allocations/cluster-123.tfstate",
+		Region:                    "us-south",
+		Endpoint:                  "https://s3.us-south.cloud-object-storage.appdomain.cloud",
+		SkipCredentialsValidation: true,
+		SkipMetadataAPICheck:      true,
+		SkipRegionValidation:      true,
+		SkipRequestingAccountID:   true,
+		ForcePathStyle:            true,
+	}
+	fake := &fakeTerraform{}
+	runner := newRunner(workspace, fake)
+	runner.Now = func() time.Time { return time.Date(2026, 9, 8, 18, 34, 29, 0, time.UTC) }
+	runner.Suffix = func() string { return "ab12cd34" }
+	runner.Environ = []string{"AWS_ACCESS_KEY_ID=secret-id", "AWS_SECRET_ACCESS_KEY=secret-value"}
+	inputs := configuredInputs(t)
+	inputs.Name = ""
+	inputs.Owner = "Servitor"
+
+	if err := runner.Plan(context.Background(), inputs, backend, resultPath); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fake.calls, [][]string{
+		{
+			"-chdir=" + workspace, "init", "-input=false", "-no-color",
+			"-backend-config=bucket=ict-state-bucket",
+			"-backend-config=key=allocations/cluster-123.tfstate",
+			"-backend-config=region=us-south",
+			"-backend-config=endpoint=https://s3.us-south.cloud-object-storage.appdomain.cloud",
+			"-backend-config=skip_credentials_validation=true",
+			"-backend-config=skip_metadata_api_check=true",
+			"-backend-config=skip_region_validation=true",
+			"-backend-config=skip_requesting_account_id=true",
+			"-backend-config=force_path_style=true",
+		},
+		{"-chdir=" + workspace, "plan", "-input=false", "-no-color", "-out=" + ictterraform.PlanName, "-var-file=" + filepath.Join(workspace, ictterraform.TFVarsName)},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Terraform calls = %#v, want %#v", got, want)
+	}
+	if strings.Contains(strings.Join(actionNames(fake.calls), ","), "apply") {
+		t.Fatalf("plan invoked apply: %#v", fake.calls)
+	}
+	if info, err := os.Stat(filepath.Join(workspace, ictterraform.PlanName)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("saved plan = %v, %v", info, err)
+	}
+	if backendData, err := os.ReadFile(filepath.Join(workspace, "backend.tf")); err != nil || !strings.Contains(string(backendData), "backend \"s3\"") {
+		t.Fatalf("backend declaration = %q, %v", backendData, err)
+	}
+	result, err := ReadPlanResult(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Values.ClusterName != "servitor-260908183429-ab12cd34" || result.PlanPath != filepath.Join(workspace, ictterraform.PlanName) || !reflect.DeepEqual(result.Backend, backend) {
+		t.Fatalf("plan result = %#v", result)
+	}
+	resultData, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(resultData), "secret-value") || strings.Contains(string(resultData), "AWS_ACCESS_KEY_ID") {
+		t.Fatalf("plan result contains credentials: %s", resultData)
+	}
+	if err := runner.Plan(context.Background(), inputs, backend, filepath.Join(t.TempDir(), "second.json")); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate plan state ID error = %v", err)
+	}
+	if err := os.WriteFile(resultPath, append(resultData, []byte(`{"credential":"not-allowed"}`)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPlanResult(resultPath); err == nil {
+		t.Fatal("result with trailing credential-like data was accepted")
+	}
+}
+
 func TestCreateApprovalPaths(t *testing.T) {
 	for _, test := range []struct {
 		name      string

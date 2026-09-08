@@ -16,7 +16,8 @@ import (
 
 // CLI is the root command grammar.
 type CLI struct {
-	Create  VPCCommand    `cmd:"" help:"Review and create a new cluster."`
+	Create  CreateCommand `cmd:"" help:"Review and create a new cluster."`
+	Plan    PlanCommand   `cmd:"" help:"Resolve inputs and create a disposable remote-backend Terraform plan."`
 	Destroy Destroy       `cmd:"" help:"Destroy only the currently managed cluster."`
 	List    ListCommand   `cmd:"" aliases:"ls" help:"List known Terraform state workspaces."`
 	Config  ConfigCommand `cmd:"" help:"Inspect effective configuration."`
@@ -53,8 +54,20 @@ type VPCCommand struct {
 	Owner                          string   `help:"Owner used when generating a name." env:"ICT_OWNER"`
 	Prefix                         string   `help:"Prefix used when generating a name." env:"ICT_PREFIX"`
 	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
-	AutoApprove                    bool     `help:"Apply without interactive approval." env:"ICT_AUTO_APPROVE"`
-	ConfirmStdin                   bool     `help:"Allow a supervised caller to provide the literal confirmation through standard input."`
+}
+
+// CreateCommand adds temporary interactive approval controls to provisioning inputs.
+type CreateCommand struct {
+	VPCCommand   `embed:""`
+	AutoApprove  bool `help:"Apply without interactive approval." env:"ICT_AUTO_APPROVE"`
+	ConfirmStdin bool `help:"Allow a supervised caller to provide the literal confirmation through standard input."`
+}
+
+// PlanCommand contains create inputs plus non-secret backend and result locations.
+type PlanCommand struct {
+	VPCCommand    `embed:""`
+	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
+	ResultFile    string `name:"result-file" required:"" help:"Absolute path for the strict non-secret plan result JSON."`
 }
 
 // Destroy deliberately accepts no replacement cluster inputs.
@@ -134,6 +147,16 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 			return err
 		}
 		return runner.Create(ctx, command.Create.inputs())
+	case "plan <state-id>":
+		runner, err := r.lifecycle(command.Plan.StateID)
+		if err != nil {
+			return err
+		}
+		backend, err := ictterraform.LoadBackendConfig(command.Plan.BackendConfig)
+		if err != nil {
+			return err
+		}
+		return runner.Plan(ctx, command.Plan.inputs(), backend, command.Plan.ResultFile)
 	case "destroy <state-id>":
 		runner, err := r.lifecycle(command.Destroy.StateID)
 		if err != nil {
@@ -200,5 +223,12 @@ func (r Runner) lifecycle(stateID string) (workflow.Runner, error) {
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Prefix: c.Prefix, Name: c.Name, AutoApprove: c.AutoApprove, ConfirmStdin: c.ConfirmStdin}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Prefix: c.Prefix, Name: c.Name}
+}
+
+func (c CreateCommand) inputs() workflow.Inputs {
+	inputs := c.VPCCommand.inputs()
+	inputs.AutoApprove = c.AutoApprove
+	inputs.ConfirmStdin = c.ConfirmStdin
+	return inputs
 }
