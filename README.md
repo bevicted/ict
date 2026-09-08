@@ -130,7 +130,9 @@ ict create example \
   --name example-cluster
 ```
 
-If `--name` is omitted, ICT generates a name from `--owner` (or `USER`) plus a timestamp and random suffix. All create flags can also be supplied through their matching `ICT_*` environment variable shown by `ict create --help`. ICT saves the reviewed plan at `.cluster/create.tfplan` with mode `0600`; treat it as sensitive and leave it in place until `ict destroy ID` removes the workspace.
+If `--name` is omitted, ICT generates a name from `--owner` (or `USER`) plus a timestamp and random suffix. `--prefix PREFIX` replaces the generated owner component: `--prefix servitor` produces `servitor-<timestamp>-<random>`, and `--prefix servitor --name example` produces `servitor-example`. Prefixes and explicit names are normalized to the provider's cluster-name rules; ICT retains the prefix and generated uniqueness suffix within provider limits. Without `--prefix`, explicit and generated names retain their existing behavior. Terraform `init`, `plan`, `apply`, and `destroy` run with `-no-color`.
+
+All create flags can also be supplied through their matching `ICT_*` environment variable shown by `ict create --help`. ICT saves the reviewed plan at `.cluster/create.tfplan` with mode `0600`; treat it as sensitive and leave it in place until `ict destroy ID` removes the workspace.
 
 ### Reuse VPC Gen 2 networking
 
@@ -213,5 +215,7 @@ ict destroy example
 Each lifecycle action uses `${XDG_STATE_HOME:-~/.local/state}/ict/ID`, where `ID` is its required positional state ID. IDs are case-sensitive ASCII strings matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`; invalid, empty, path-like, hidden, Unicode, and overlength IDs are rejected. Different IDs are sibling workspaces, for example `.../ict/default` and `.../ict/slack-user-42`. A state ID is one-shot: once create reserves its workspace, every later create for that ID fails until explicit `ict destroy ID` removes it. A workspace holds Terraform state, provider runtime data, generated values, recovery context, and the sensitive saved plan with private permissions. Terraform state is authoritative for managed resources. Do not add workspaces to source control, copy them into issue reports, or delete them while resources may exist. Failed initialization, planning, or apply attempts remain in `ict list` for diagnosis and must also be removed with `ict destroy ID`.
 
 `ict list` and `ict ls` are the same read-only workspace inventory. They print valid immediate real-directory IDs in lexical order, one ID per line. Retained failed create attempts are included without inspecting Terraform state; files, symlinks, invalid names, and nested directories are ignored. If the ICT state root is absent, the command prints nothing and does not create it.
+
+`ict list --output json` is a private machine-readable inventory for supervised integrations. It writes one versioned JSON document containing the canonical absolute `state_root` and each validated workspace ID with its canonical absolute path. Its paths can reveal private host layout and must not be copied to user-visible output, source control, or issue reports. The default human output is unchanged.
 
 Each ICT binary materializes its embedded Terraform files into that workspace. A newer binary can therefore change the Terraform configuration used by a later destroy; do not assume an upgrade is behaviorally neutral.

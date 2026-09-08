@@ -116,7 +116,18 @@ func TestListWorkspacesSortsAndFiltersEntries(t *testing.T) {
 
 func TestStateRootCanonicalizesRelativeStateHome(t *testing.T) {
 	workingDirectory := t.TempDir()
-	t.Chdir(workingDirectory)
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDirectory); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
 	t.Setenv("XDG_STATE_HOME", "state home")
 
 	root, err := StateRoot()
