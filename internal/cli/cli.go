@@ -3,10 +3,7 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 
 	"github.com/alecthomas/kong"
 	"github.com/bevicted/ict/internal/config"
@@ -16,16 +13,15 @@ import (
 
 // CLI is the root command grammar.
 type CLI struct {
-	Create  CreateCommand `cmd:"" help:"Review and create a new cluster."`
-	Plan    PlanCommand   `cmd:"" help:"Resolve inputs and create a disposable remote-backend Terraform plan."`
-	Destroy Destroy       `cmd:"" help:"Destroy only the currently managed cluster."`
-	List    ListCommand   `cmd:"" aliases:"ls" help:"List known Terraform state workspaces."`
-	Config  ConfigCommand `cmd:"" help:"Inspect effective configuration."`
+	Plan    PlanCommand    `cmd:"" help:"Resolve inputs and create a disposable remote-backend Terraform plan."`
+	Apply   ApplyCommand   `cmd:"" help:"Apply frozen planning metadata with a fresh Terraform plan."`
+	Destroy DestroyCommand `cmd:"" help:"Destroy remote Terraform state from frozen planning metadata."`
+	Config  ConfigCommand  `cmd:"" help:"Inspect effective configuration."`
 }
 
-// VPCCommand contains the transient inputs for create.
+// VPCCommand contains transient planning inputs.
 type VPCCommand struct {
-	StateID                        string   `arg:"" name:"state-id" help:"Terraform state workspace identifier."`
+	StateID                        string   `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
 	Config                         string   `help:"Target configuration file." env:"ICT_CONFIG"`
 	Target                         string   `help:"Configured target name." env:"ICT_TARGET"`
 	Provider                       string   `help:"Cluster provider (vpc-gen2, classic, or satellite)." env:"ICT_PROVIDER"`
@@ -56,28 +52,28 @@ type VPCCommand struct {
 	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
 }
 
-// CreateCommand adds temporary interactive approval controls to provisioning inputs.
-type CreateCommand struct {
-	VPCCommand   `embed:""`
-	AutoApprove  bool `help:"Apply without interactive approval." env:"ICT_AUTO_APPROVE"`
-	ConfirmStdin bool `help:"Allow a supervised caller to provide the literal confirmation through standard input."`
-}
-
-// PlanCommand contains create inputs plus non-secret backend and result locations.
+// PlanCommand contains planning inputs plus non-secret backend and result locations.
 type PlanCommand struct {
 	VPCCommand    `embed:""`
 	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
-	ResultFile    string `name:"result-file" required:"" help:"Absolute path for the strict non-secret plan result JSON."`
+	ResultFile    string `name:"result-file" required:"" help:"Absolute path for strict frozen planning metadata JSON."`
 }
 
-// Destroy deliberately accepts no replacement cluster inputs.
-type Destroy struct {
-	StateID string `arg:"" name:"state-id" help:"Terraform state workspace identifier."`
+// ApplyCommand uses only frozen planning metadata and a matching backend identity.
+type ApplyCommand struct {
+	StateID       string `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
+	ContextFile   string `name:"context-file" required:"" help:"Absolute path to strict frozen planning metadata JSON."`
+	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
+	ResultFile    string `name:"result-file" required:"" help:"Absolute path for the bounded apply result JSON."`
+	AutoApprove   bool   `name:"auto-approve" help:"Required acknowledgement for noninteractive apply."`
 }
 
-// ListCommand selects the human or machine-readable workspace inventory.
-type ListCommand struct {
-	Output string `help:"Output format (json)."`
+// DestroyCommand uses only frozen planning metadata and a matching backend identity.
+type DestroyCommand struct {
+	StateID       string `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
+	ContextFile   string `name:"context-file" required:"" help:"Absolute path to strict frozen planning metadata JSON."`
+	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
+	ResultFile    string `name:"result-file" required:"" help:"Absolute path for the bounded destroy result JSON."`
 }
 
 // ConfigCommand contains configuration inspection and mutation commands.
@@ -88,25 +84,21 @@ type ConfigCommand struct {
 	Edit ConfigEdit `cmd:"" help:"Edit or replace stored configuration without validation."`
 }
 
-// ConfigShow contains options for config show.
 type ConfigShow struct {
 	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
 }
 
-// ConfigGet contains options for config get.
 type ConfigGet struct {
 	Path   string `arg:"" name:"path" help:"Dot-separated effective configuration path."`
 	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
 }
 
-// ConfigSet contains options for config set.
 type ConfigSet struct {
 	Path   string `arg:"" name:"path" help:"Dot-separated stored configuration path."`
 	Value  string `arg:"" name:"yaml-value" help:"Inline YAML value, or - to read one YAML value from stdin."`
 	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
 }
 
-// ConfigEdit contains options for config edit.
 type ConfigEdit struct {
 	Config string `help:"Target configuration file." env:"ICT_CONFIG"`
 }
@@ -126,14 +118,12 @@ func Parse(args []string) (*kong.Context, *CLI, error) {
 type Runner struct {
 	Workflow workflow.Runner
 	Config   config.Runner
-	Stdout   io.Writer
 }
 
 // Run dispatches the selected command.
 func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
-	runner := Runner{}
-	if err := runner.Run(ctx, parsed, command); err != nil {
-		return err
+	if err := (Runner{}).Run(ctx, parsed, command); err != nil {
+		return fmt.Errorf("run command: %w", err)
 	}
 	return nil
 }
@@ -141,30 +131,36 @@ func Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 // Run dispatches the selected command through its appropriate runner.
 func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) error {
 	switch parsed.Command() {
-	case "create <state-id>":
-		runner, err := r.lifecycle(command.Create.StateID)
-		if err != nil {
-			return err
-		}
-		return runner.Create(ctx, command.Create.inputs())
 	case "plan <state-id>":
-		runner, err := r.lifecycle(command.Plan.StateID)
-		if err != nil {
+		if err := validateStateID(command.Plan.StateID); err != nil {
 			return err
 		}
 		backend, err := ictterraform.LoadBackendConfig(command.Plan.BackendConfig)
 		if err != nil {
 			return err
 		}
-		return runner.Plan(ctx, command.Plan.inputs(), backend, command.Plan.ResultFile)
-	case "destroy <state-id>":
-		runner, err := r.lifecycle(command.Destroy.StateID)
+		return r.Workflow.Plan(ctx, command.Plan.StateID, command.Plan.inputs(), backend, command.Plan.ResultFile)
+	case "apply <state-id>":
+		if !command.Apply.AutoApprove {
+			return fmt.Errorf("apply requires --auto-approve")
+		}
+		if err := validateStateID(command.Apply.StateID); err != nil {
+			return err
+		}
+		backend, err := ictterraform.LoadBackendConfig(command.Apply.BackendConfig)
 		if err != nil {
 			return err
 		}
-		return runner.Destroy(ctx)
-	case "list":
-		return r.list(command.List.Output)
+		return r.Workflow.Apply(ctx, command.Apply.StateID, command.Apply.ContextFile, backend, command.Apply.ResultFile)
+	case "destroy <state-id>":
+		if err := validateStateID(command.Destroy.StateID); err != nil {
+			return err
+		}
+		backend, err := ictterraform.LoadBackendConfig(command.Destroy.BackendConfig)
+		if err != nil {
+			return err
+		}
+		return r.Workflow.Destroy(ctx, command.Destroy.StateID, command.Destroy.ContextFile, backend, command.Destroy.ResultFile)
 	case "config show":
 		return r.Config.Show(command.Config.Show.Config)
 	case "config get <path>":
@@ -178,57 +174,13 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 	}
 }
 
-func (r Runner) list(output string) error {
-	if output == "json" {
-		inventory, err := ictterraform.ListWorkspaceInventory()
-		if err != nil {
-			return err
-		}
-		if err := json.NewEncoder(r.stdout()).Encode(inventory); err != nil {
-			return fmt.Errorf("write JSON state workspace list: %w", err)
-		}
-		return nil
-	}
-	if output != "" {
-		return fmt.Errorf("unsupported list output %q", output)
-	}
-
-	workspaces, err := ictterraform.ListWorkspaces()
-	if err != nil {
-		return err
-	}
-	for _, workspace := range workspaces {
-		if _, err := fmt.Fprintln(r.stdout(), workspace); err != nil {
-			return fmt.Errorf("write state workspace list: %w", err)
-		}
+func validateStateID(stateID string) error {
+	if err := ictterraform.ValidateStateID(stateID); err != nil {
+		return fmt.Errorf("validate lifecycle operation identifier: %w", err)
 	}
 	return nil
 }
 
-func (r Runner) stdout() io.Writer {
-	if r.Stdout != nil {
-		return r.Stdout
-	}
-	return os.Stdout
-}
-
-func (r Runner) lifecycle(stateID string) (workflow.Runner, error) {
-	workspace, err := ictterraform.Workspace(stateID)
-	if err != nil {
-		return workflow.Runner{}, err
-	}
-	runner := r.Workflow
-	runner.Workspace = workspace
-	return runner, nil
-}
-
 func (c VPCCommand) inputs() workflow.Inputs {
 	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Prefix: c.Prefix, Name: c.Name}
-}
-
-func (c CreateCommand) inputs() workflow.Inputs {
-	inputs := c.VPCCommand.inputs()
-	inputs.AutoApprove = c.AutoApprove
-	inputs.ConfirmStdin = c.ConfirmStdin
-	return inputs
 }

@@ -2,7 +2,6 @@
 package prompt
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -28,18 +27,6 @@ func (e *MissingInputError) Error() string {
 // CanPrompt reports whether both standard streams are interactive terminals.
 func CanPrompt() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-}
-
-// Confirm accepts only Terraform's literal yes response.
-func Confirm(input io.Reader, output io.Writer) (bool, error) {
-	if _, err := fmt.Fprint(output, "Do you want to perform these actions?\n  Enter a value: "); err != nil {
-		return false, fmt.Errorf("write confirmation prompt: %w", err)
-	}
-	answer, err := bufio.NewReader(input).ReadString('\n')
-	if err != nil {
-		return false, fmt.Errorf("read confirmation: %w", err)
-	}
-	return strings.TrimSuffix(answer, "\n") == "yes", nil
 }
 
 // Select chooses one value with the optional fzf executable.

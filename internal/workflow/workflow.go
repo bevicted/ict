@@ -75,8 +75,6 @@ type Inputs struct {
 	Owner                          string
 	Prefix                         string
 	Name                           string
-	AutoApprove                    bool
-	ConfirmStdin                   bool
 }
 
 // Values are the normalized values persisted in tfvars and recovery context.
@@ -121,10 +119,18 @@ type RecoveryContext struct {
 // PlanResult is the strict non-secret handoff from a disposable planning workspace.
 type PlanResult struct {
 	Version  int                        `json:"version"`
+	StateID  string                     `json:"state_id"`
 	Values   Values                     `json:"values"`
 	Recovery RecoveryContext            `json:"recovery"`
 	Backend  ictterraform.BackendConfig `json:"backend"`
 	PlanPath string                     `json:"plan_path"`
+}
+
+// OperationResult is the bounded local handoff for a completed apply or destroy.
+type OperationResult struct {
+	Version   int    `json:"version"`
+	Operation string `json:"operation"`
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // CommandRunner is the injectable Terraform subprocess seam.
@@ -180,14 +186,12 @@ type Runner struct {
 	IBMCloud    ibmcloud.Runner
 	Workspace   string
 	Environ     []string
-	Stdin       io.Reader
 	Stdout      io.Writer
 	Stderr      io.Writer
 	Terminal    func() bool
 	Now         func() time.Time
 	Suffix      func() string
 	Materialize func(workspace string) error
-	RemoveAll   func(path string) error
 }
 
 func (r Runner) baseEnvironment() []string {
@@ -220,11 +224,27 @@ func (r Runner) environment(endpoints map[string]string) []string {
 	return result
 }
 
-func (r Runner) workspace() (string, error) {
+func (r Runner) operationWorkspace() (string, error) {
 	if r.Workspace != "" {
+		if err := os.MkdirAll(filepath.Dir(r.Workspace), 0o700); err != nil {
+			return "", fmt.Errorf("create temporary Terraform workspace parent: %w", err)
+		}
+		if err := os.Mkdir(r.Workspace, 0o700); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return "", fmt.Errorf("temporary Terraform workspace already exists: %s", r.Workspace)
+			}
+			return "", fmt.Errorf("create temporary Terraform workspace: %w", err)
+		}
 		return r.Workspace, nil
 	}
-	return ictterraform.Workspace(ictterraform.DefaultStateID)
+	workspace, err := os.MkdirTemp("", "ict-operation-")
+	if err != nil {
+		return "", fmt.Errorf("create temporary Terraform workspace: %w", err)
+	}
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		return "", fmt.Errorf("protect temporary Terraform workspace: %w", err)
+	}
+	return workspace, nil
 }
 
 func (r Runner) materialize(workspace string) error {
@@ -255,13 +275,6 @@ func (r Runner) stderr() io.Writer {
 	return os.Stderr
 }
 
-func (r Runner) stdin() io.Reader {
-	if r.Stdin != nil {
-		return r.Stdin
-	}
-	return os.Stdin
-}
-
 func (r Runner) terminal() bool {
 	if r.Terminal != nil {
 		return r.Terminal()
@@ -269,82 +282,8 @@ func (r Runner) terminal() bool {
 	return prompt.CanPrompt()
 }
 
-// Create performs a single review-and-apply lifecycle for a new workspace.
-func (r Runner) Create(ctx context.Context, supplied Inputs) error {
-	cfg, _, err := config.LoadDiscovered(supplied.ConfigPath)
-	if err != nil {
-		return err
-	}
-	values, target, err := r.resolve(ctx, cfg, supplied)
-	if err != nil {
-		return err
-	}
-	if values.ClusterMode == "classic" {
-		if err := requireClassicCredentials(r.baseEnvironment()); err != nil {
-			return err
-		}
-	}
-	if !supplied.AutoApprove && !supplied.ConfirmStdin && !r.terminal() {
-		return errors.New("create requires --auto-approve, --confirm-stdin, or ICT_AUTO_APPROVE when standard input is not interactive")
-	}
-	recovery, err := newRecoveryContext(target, values)
-	if err != nil {
-		return err
-	}
-	tfvarsData, err := marshalJSON(values)
-	if err != nil {
-		return err
-	}
-	recoveryData, err := marshalJSON(recovery)
-	if err != nil {
-		return err
-	}
-	workspace, err := r.workspace()
-	if err != nil {
-		return err
-	}
-	if err := ictterraform.ReserveWorkspace(workspace); err != nil {
-		return err
-	}
-	contextPath := filepath.Join(workspace, ictterraform.ContextName)
-	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
-	if err := ictterraform.AtomicWrite(tfvarsPath, tfvarsData); err != nil {
-		return fmt.Errorf("write runtime values: %w", err)
-	}
-	if err := ictterraform.AtomicWrite(contextPath, recoveryData); err != nil {
-		return fmt.Errorf("write runtime values: %w", err)
-	}
-	if err := r.materialize(workspace); err != nil {
-		return err
-	}
-	environment := r.environment(target.Environment())
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false", "-no-color"); err != nil {
-		return err
-	}
-	planPath := filepath.Join(workspace, ictterraform.PlanName)
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-no-color", "-out="+ictterraform.PlanName, "-var-file="+tfvarsPath); err != nil {
-		return err
-	}
-	if err := os.Chmod(planPath, 0o600); err != nil {
-		return fmt.Errorf("protect saved Terraform plan: %w", err)
-	}
-	if !supplied.AutoApprove {
-		approved, err := prompt.Confirm(r.stdin(), r.stdout())
-		if err != nil {
-			return err
-		}
-		if !approved {
-			if err := r.removeAll()(workspace); err != nil {
-				return fmt.Errorf("cleanup declined workspace %s: %w", workspace, err)
-			}
-			return nil
-		}
-	}
-	return r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "apply", "-input=false", "-no-color", ictterraform.PlanName)
-}
-
-// Plan resolves inputs once, initializes the configured remote backend, and writes a disposable plan result.
-func (r Runner) Plan(ctx context.Context, supplied Inputs, backend ictterraform.BackendConfig, resultPath string) error {
+// Plan resolves inputs once, initializes the configured remote backend, and writes frozen metadata.
+func (r Runner) Plan(ctx context.Context, stateID string, supplied Inputs, backend ictterraform.BackendConfig, resultPath string) error {
 	if err := backend.Validate(); err != nil {
 		return err
 	}
@@ -372,11 +311,8 @@ func (r Runner) Plan(ctx context.Context, supplied Inputs, backend ictterraform.
 	if err != nil {
 		return err
 	}
-	workspace, err := r.workspace()
+	workspace, err := r.operationWorkspace()
 	if err != nil {
-		return err
-	}
-	if err := ictterraform.ReserveWorkspace(workspace); err != nil {
 		return err
 	}
 	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
@@ -404,62 +340,100 @@ func (r Runner) Plan(ctx context.Context, supplied Inputs, backend ictterraform.
 	if err := os.Chmod(planPath, 0o600); err != nil {
 		return fmt.Errorf("protect saved Terraform plan: %w", err)
 	}
-	if err := writeJSON(resultPath, PlanResult{Version: 1, Values: values, Recovery: recovery, Backend: backend, PlanPath: planPath}); err != nil {
+	if err := writeJSON(resultPath, PlanResult{Version: 1, StateID: stateID, Values: values, Recovery: recovery, Backend: backend, PlanPath: planPath}); err != nil {
 		return fmt.Errorf("write plan result: %w", err)
 	}
 	return nil
 }
 
-func (r Runner) removeAll() func(string) error {
-	if r.RemoveAll != nil {
-		return r.RemoveAll
+// Apply reconstructs frozen inputs in fresh storage and performs a fresh auto-approved apply.
+func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string) error {
+	result, err := r.loadOperationContext(stateID, contextPath, backend, resultPath)
+	if err != nil {
+		return err
 	}
-	return os.RemoveAll
+	return r.runOperation(ctx, "apply", result, resultPath)
 }
 
-// Destroy removes a workspace with no state directly, or destroys its saved state.
-func (r Runner) Destroy(ctx context.Context) error {
-	workspace, err := r.workspace()
+// Destroy reconstructs frozen inputs in fresh storage and always asks the remote backend to destroy.
+func (r Runner) Destroy(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string) error {
+	result, err := r.loadOperationContext(stateID, contextPath, backend, resultPath)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(workspace, "terraform.tfstate")); errors.Is(err, os.ErrNotExist) {
-		if err := r.removeAll()(workspace); err != nil {
-			return fmt.Errorf("cleanup workspace without Terraform state %s: %w", workspace, err)
-		}
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("inspect Terraform state file: %w", err)
+	return r.runOperation(ctx, "destroy", result, resultPath)
+}
+
+func (r Runner) loadOperationContext(stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string) (PlanResult, error) {
+	if err := backend.Validate(); err != nil {
+		return PlanResult{}, err
 	}
-	contextPath := filepath.Join(workspace, ictterraform.ContextName)
+	if err := ictterraform.ValidateResultPath(resultPath); err != nil {
+		return PlanResult{}, err
+	}
+	result, err := ReadPlanResult(contextPath)
+	if err != nil {
+		return PlanResult{}, err
+	}
+	if result.StateID != stateID {
+		return PlanResult{}, errors.New("frozen context does not match lifecycle operation identifier")
+	}
+	if !reflect.DeepEqual(result.Backend, backend) {
+		return PlanResult{}, errors.New("frozen context backend does not match backend configuration")
+	}
+	return result, nil
+}
+
+func (r Runner) runOperation(ctx context.Context, operation string, result PlanResult, resultPath string) error {
+	workspace, err := r.operationWorkspace()
+	if err != nil {
+		return err
+	}
+	tfvarsData, err := marshalJSON(result.Values)
+	if err != nil {
+		return err
+	}
 	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
-	recovery, err := readRecovery(contextPath)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(tfvarsPath); err != nil {
-		return fmt.Errorf("no saved Terraform values at %s; cannot safely destroy state", tfvarsPath)
-	}
-	if err := savedInputsMatch(tfvarsPath, contextPath, recovery); err != nil {
-		return err
+	if err := ictterraform.AtomicWrite(tfvarsPath, tfvarsData); err != nil {
+		return fmt.Errorf("write runtime values: %w", err)
 	}
 	if err := r.materialize(workspace); err != nil {
 		return err
 	}
-	environment := r.environment(config.ResolvedTarget{Target: config.Target{Endpoints: recovery.Endpoints}}.Environment())
-	if recovery.Values.ClusterMode == "classic" {
+	if err := ictterraform.MaterializeBackend(workspace); err != nil {
+		return fmt.Errorf("materialize Terraform backend: %w", err)
+	}
+	environment := r.environment(config.ResolvedTarget{Target: config.Target{Endpoints: result.Recovery.Endpoints}}.Environment())
+	if result.Values.ClusterMode == "classic" {
 		if err := requireClassicCredentials(r.baseEnvironment()); err != nil {
 			return err
 		}
 	}
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "init", "-input=false", "-no-color"); err != nil {
+	initArgs := append([]string{"-chdir=" + workspace, "init", "-input=false", "-no-color"}, result.Backend.InitArgs()...)
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", initArgs...); err != nil {
 		return err
 	}
-	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "destroy", "-input=false", "-no-color", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
+	args := []string{"-chdir=" + workspace, operation, "-input=false", "-no-color", "-auto-approve", "-var-file=" + tfvarsPath}
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", args...); err != nil {
 		return err
 	}
-	if err := r.removeAll()(workspace); err != nil {
-		return fmt.Errorf("cleanup destroyed workspace %s: %w", workspace, err)
+	if err := writeOperationResult(resultPath, operation, workspace); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeOperationResult(path, operation, workspace string) error {
+	result := OperationResult{Version: 1, Operation: operation, Workspace: workspace}
+	data, err := marshalJSON(result)
+	if err != nil {
+		return err
+	}
+	if len(data) > 4096 {
+		return errors.New("operation result exceeds 4096 bytes")
+	}
+	if err := ictterraform.AtomicWrite(path, data); err != nil {
+		return fmt.Errorf("write operation result: %w", err)
 	}
 	return nil
 }
@@ -1360,6 +1334,9 @@ func ReadPlanResult(path string) (PlanResult, error) {
 	if result.Version != 1 {
 		return PlanResult{}, fmt.Errorf("unsupported plan result version %d", result.Version)
 	}
+	if err := ictterraform.ValidateStateID(result.StateID); err != nil {
+		return PlanResult{}, fmt.Errorf("invalid plan result lifecycle operation identifier: %w", err)
+	}
 	if err := result.Backend.Validate(); err != nil {
 		return PlanResult{}, fmt.Errorf("invalid plan result backend: %w", err)
 	}
@@ -1395,24 +1372,6 @@ func tfvarsSHA256(data []byte) string {
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
 }
-func readRecovery(path string) (RecoveryContext, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return RecoveryContext{}, fmt.Errorf("no saved context at %s; cannot safely destroy endpoints", path)
-	}
-	var recovery RecoveryContext
-	if err := json.Unmarshal(data, &recovery); err != nil || recovery.Version != 1 || recovery.Target == "" {
-		return RecoveryContext{}, errors.New("invalid saved context")
-	}
-	if err := canonicalizeSatelliteRecoveryNetworking(&recovery.Values); err != nil {
-		return RecoveryContext{}, errors.New("invalid saved context")
-	}
-	if err := validateRecoveryForDestroy(recovery); err != nil {
-		return RecoveryContext{}, err
-	}
-	return recovery, nil
-}
-
 func validateRecoveryForDestroy(recovery RecoveryContext) error {
 	if len(recovery.TFVarsSHA256) != sha256.Size*2 {
 		return incompleteRecoveryContextError()
@@ -1485,48 +1444,6 @@ func emptyValues(values Values, provider string) bool {
 
 func incompleteRecoveryContextError() error {
 	return errIncompleteRecoveryContext
-}
-
-func savedInputsMatch(tfvarsPath, contextPath string, expected RecoveryContext) error {
-	tfvars, err := os.ReadFile(tfvarsPath)
-	if err != nil {
-		return errors.New("Terraform state manages resources but saved recovery inputs are missing")
-	}
-	actualValues, err := decodeValues(tfvars)
-	if err != nil {
-		return errors.New("Terraform state manages resources but saved recovery inputs are invalid")
-	}
-	actual, err := readRecovery(contextPath)
-	if err != nil {
-		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
-	}
-	if actual.TFVarsSHA256 != tfvarsSHA256(tfvars) {
-		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
-	}
-	actualValues, err = recoveryValuesFromTFVars(actualValues, actual.SatelliteSSHPublicKeyFingerprint)
-	if err != nil || !reflect.DeepEqual(actualValues, expected.Values) {
-		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
-	}
-	// The saved digest binds the original tfvars bytes. Ignore its value when
-	// comparing otherwise canonical recovery metadata from older releases.
-	actual.TFVarsSHA256 = expected.TFVarsSHA256
-	if !reflect.DeepEqual(actual, expected) {
-		return errors.New("Terraform state manages resources and requested inputs differ from saved recovery inputs")
-	}
-	return nil
-}
-
-func decodeValues(data []byte) (Values, error) {
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	var values Values
-	if err := decoder.Decode(&values); err != nil {
-		return Values{}, err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return Values{}, errors.New("invalid trailing JSON")
-	}
-	return values, nil
 }
 
 func recoveryValuesFromTFVars(values Values, fingerprint string) (Values, error) {

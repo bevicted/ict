@@ -12,7 +12,6 @@ func TestSatelliteValidationRemainsPreflight(t *testing.T) {
 	inputs := configuredInputs(t)
 	inputs.Provider = "satellite"
 	inputs.Platform = "kubernetes"
-	inputs.AutoApprove = true
 	content, err := os.ReadFile(inputs.ConfigPath)
 	if err != nil {
 		t.Fatal(err)
@@ -25,7 +24,7 @@ func TestSatelliteValidationRemainsPreflight(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	fake := &fakeTerraform{}
 	runner := newRunner(workspace, fake)
-	if err := runner.Create(context.Background(), inputs); err == nil || !strings.Contains(err.Error(), "requires the openshift platform") {
+	if err := runner.Plan(context.Background(), "fixture", inputs, backendConfig(), filepath.Join(t.TempDir(), "context.json")); err == nil || !strings.Contains(err.Error(), "requires the openshift platform") {
 		t.Fatalf("Satellite preflight error = %v", err)
 	}
 	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
