@@ -14,7 +14,7 @@ import (
 // CLI is the root command grammar.
 type CLI struct {
 	Plan    PlanCommand    `cmd:"" help:"Resolve inputs and create a disposable remote-backend Terraform plan."`
-	Apply   ApplyCommand   `cmd:"" help:"Apply frozen planning metadata with a fresh Terraform plan."`
+	Apply   ApplyCommand   `cmd:"" help:"Apply frozen planning metadata with a fresh Terraform plan and --auto-approve."`
 	Destroy DestroyCommand `cmd:"" help:"Destroy remote Terraform state from frozen planning metadata."`
 	Config  ConfigCommand  `cmd:"" help:"Inspect effective configuration."`
 }
@@ -38,7 +38,7 @@ type VPCCommand struct {
 	PublicVLANID                   string   `name:"public-vlan-id" help:"Existing numeric Classic public VLAN ID." env:"ICT_PUBLIC_VLAN_ID"`
 	PrivateVLANID                  string   `name:"private-vlan-id" help:"Existing numeric Classic private VLAN ID." env:"ICT_PRIVATE_VLAN_ID"`
 	SatelliteZones                 []string `name:"satellite-zone" help:"Satellite VPC host zone; repeat exactly three times." env:"ICT_SATELLITE_ZONES" sep:","`
-	SatelliteManagedFrom           string   `name:"satellite-managed-from" help:"Satellite management location when ICT creates one." env:"ICT_SATELLITE_MANAGED_FROM"`
+	SatelliteManagedFrom           string   `name:"satellite-managed-from" help:"Satellite management location for a new Satellite location." env:"ICT_SATELLITE_MANAGED_FROM"`
 	SatelliteLocationID            string   `name:"satellite-location-id" help:"Existing healthy Satellite location ID to reuse." env:"ICT_SATELLITE_LOCATION_ID"`
 	SatelliteHostImage             string   `name:"satellite-host-image" help:"Public RHEL image for Satellite hosts." env:"ICT_SATELLITE_HOST_IMAGE"`
 	SatelliteHostProfile           string   `name:"satellite-host-profile" help:"VPC host profile for Satellite." env:"ICT_SATELLITE_HOST_PROFILE"`

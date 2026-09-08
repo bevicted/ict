@@ -85,6 +85,8 @@ It initializes the S3 backend and produces a disposable Terraform plan without a
 
 Generated names, defaults, endpoint selection, provider ownership choices, and the canonical tfvars digest are resolved only by `plan`. VPC Gen 2, Classic, and Satellite recovery safeguards remain encoded in those frozen values. Existing VPC networking, Satellite infrastructure, and externally owned resources continue to be represented as Terraform data sources and are not deleted by destroy.
 
+When ICT is used by Servitor, Slack approval authorizes this frozen configuration, not an immutable Terraform action list. `apply` deliberately makes a fresh plan, so cloud or provider drift between review and apply can change the resulting actions. The review plan is ephemeral and is neither saved for approval nor accepted as an apply input.
+
 ### Apply
 
 `apply` accepts no replacement cluster inputs. It requires matching frozen context and backend files, a result file, and `--auto-approve`:
