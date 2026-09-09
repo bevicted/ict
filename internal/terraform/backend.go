@@ -129,6 +129,7 @@ func (c BackendConfig) Validate() error {
 
 // InitArgs returns deterministic non-secret Terraform init backend arguments.
 func (c BackendConfig) InitArgs() []string {
+	// Terraform 1.5 rejects skip_requesting_account_id for the S3 backend.
 	return []string{
 		"-backend-config=bucket=" + c.Bucket,
 		"-backend-config=key=" + c.Key,
@@ -137,7 +138,6 @@ func (c BackendConfig) InitArgs() []string {
 		fmt.Sprintf("-backend-config=skip_credentials_validation=%t", c.SkipCredentialsValidation),
 		fmt.Sprintf("-backend-config=skip_metadata_api_check=%t", c.SkipMetadataAPICheck),
 		fmt.Sprintf("-backend-config=skip_region_validation=%t", c.SkipRegionValidation),
-		fmt.Sprintf("-backend-config=skip_requesting_account_id=%t", c.SkipRequestingAccountID),
 		fmt.Sprintf("-backend-config=force_path_style=%t", c.ForcePathStyle),
 	}
 }

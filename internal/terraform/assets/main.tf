@@ -213,22 +213,22 @@ resource "ibm_container_vpc_cluster" "cluster" {
     }
 
     precondition {
-      condition     = var.vpc_id == null || length(coalesce(var.subnet_ids, [])) == 0 || data.ibm_is_vpc.cluster[0].id == data.ibm_is_subnet.cluster[0].vpc
+      condition     = var.vpc_id == null || length(coalesce(var.subnet_ids, [])) == 0 ? true : data.ibm_is_vpc.cluster[0].id == data.ibm_is_subnet.cluster[0].vpc
       error_message = "The supplied VPC and subnet must belong to the same VPC."
     }
 
     precondition {
-      condition     = var.vpc_id == null || length(coalesce(var.public_gateway_ids, [])) == 0 || data.ibm_is_vpc.cluster[0].id == try(local.supplied_public_gateway.vpc, "")
+      condition     = var.vpc_id == null || length(coalesce(var.public_gateway_ids, [])) == 0 ? true : data.ibm_is_vpc.cluster[0].id == try(local.supplied_public_gateway.vpc, "")
       error_message = "The supplied VPC and public gateway must belong to the same VPC."
     }
 
     precondition {
-      condition     = length(coalesce(var.subnet_ids, [])) == 0 || length(coalesce(var.public_gateway_ids, [])) == 0 || data.ibm_is_subnet.cluster[0].vpc == try(local.supplied_public_gateway.vpc, "")
+      condition     = length(coalesce(var.subnet_ids, [])) == 0 || length(coalesce(var.public_gateway_ids, [])) == 0 ? true : data.ibm_is_subnet.cluster[0].vpc == try(local.supplied_public_gateway.vpc, "")
       error_message = "The supplied subnet and public gateway must belong to the same VPC."
     }
 
     precondition {
-      condition     = length(coalesce(var.subnet_ids, [])) == 0 || data.ibm_is_subnet.cluster[0].zone == var.zone
+      condition     = length(coalesce(var.subnet_ids, [])) == 0 ? true : data.ibm_is_subnet.cluster[0].zone == var.zone
       error_message = "The supplied subnet must be in the requested zone."
     }
 
