@@ -150,11 +150,6 @@ func (r Runner) exportPublicAuth(ctx context.Context, result PlanResult, export 
 		_ = writeAuthManifest(export.ManifestPath, manifest)
 		return
 	}
-	if err := os.Chmod(export.OutputDir, 0o700); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
-		return
-	}
-
 	authCtx, cancel := context.WithTimeout(ctx, r.authTimeout())
 	defer cancel()
 	workspace, err := os.MkdirTemp("", "ict-auth-")

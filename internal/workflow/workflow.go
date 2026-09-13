@@ -182,18 +182,19 @@ func terraformCommand(ctx context.Context, environ []string, command string, arg
 
 // Runner wires filesystem and subprocess dependencies for a command invocation.
 type Runner struct {
-	Terraform       CommandRunner
-	IBMCloud        ibmcloud.Runner
-	Workspace       string
-	Environ         []string
-	Stdout          io.Writer
-	Stderr          io.Writer
-	Terminal        func() bool
-	Now             func() time.Time
-	Suffix          func() string
-	Materialize     func(workspace string) error
-	MaterializeAuth func(workspace string) error
-	AuthTimeout     time.Duration
+	Terraform             CommandRunner
+	IBMCloud              ibmcloud.Runner
+	Workspace             string
+	Environ               []string
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Terminal              func() bool
+	Now                   func() time.Time
+	Suffix                func() string
+	Materialize           func(workspace string) error
+	MaterializeAuth       func(workspace string) error
+	AuthTimeout           time.Duration
+	InfrastructureTimeout time.Duration
 }
 
 func (r Runner) baseEnvironment() []string {
@@ -348,6 +349,8 @@ func (r Runner) Plan(ctx context.Context, stateID string, supplied Inputs, backe
 	return nil
 }
 
+const defaultInfrastructureTimeout = 95 * time.Minute
+
 // Apply reconstructs frozen inputs in fresh storage and performs a fresh auto-approved apply.
 func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string, authExport AuthExport) error {
 	if err := validateAuthExport(authExport); err != nil {
@@ -357,7 +360,9 @@ func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend 
 	if err != nil {
 		return err
 	}
-	if err := r.runOperation(ctx, "apply", result, resultPath); err != nil {
+	infrastructureCtx, cancel := context.WithTimeout(ctx, r.infrastructureTimeout())
+	defer cancel()
+	if err := r.runOperation(infrastructureCtx, "apply", result, resultPath); err != nil {
 		return err
 	}
 	r.exportPublicAuth(ctx, result, authExport)
@@ -375,6 +380,13 @@ func (r Runner) Destroy(ctx context.Context, stateID, contextPath string, backen
 	}
 	r.cleanupAuth(ctx, result)
 	return nil
+}
+
+func (r Runner) infrastructureTimeout() time.Duration {
+	if r.InfrastructureTimeout > 0 {
+		return r.InfrastructureTimeout
+	}
+	return defaultInfrastructureTimeout
 }
 
 func (r Runner) loadOperationContext(stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string) (PlanResult, error) {
