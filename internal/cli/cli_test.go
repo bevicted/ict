@@ -21,11 +21,13 @@ func TestSplitLifecycleGrammarRejectsCreate(t *testing.T) {
 	if parsed.Command() != "plan <state-id>" || command.Plan.StateID != "fixture" || command.Plan.Provider != "vpc-gen2" || command.Plan.BackendConfig != backendPath || command.Plan.ResultFile != contextPath {
 		t.Fatalf("plan = %#v", command.Plan)
 	}
-	parsed, command, err = Parse([]string{"apply", "fixture", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath, "--auto-approve"})
+	manifestPath := filepath.Join(t.TempDir(), "auth-manifest.json")
+	outputDir := filepath.Join(t.TempDir(), "auth")
+	parsed, command, err = Parse([]string{"apply", "fixture", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath, "--auth-manifest-file", manifestPath, "--auth-output-dir", outputDir, "--auto-approve"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Command() != "apply <state-id>" || command.Apply.StateID != "fixture" || !command.Apply.AutoApprove {
+	if parsed.Command() != "apply <state-id>" || command.Apply.StateID != "fixture" || !command.Apply.AutoApprove || command.Apply.AuthManifestFile != manifestPath || command.Apply.AuthOutputDir != outputDir {
 		t.Fatalf("apply = %#v", command.Apply)
 	}
 	parsed, command, err = Parse([]string{"destroy", "fixture", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath})

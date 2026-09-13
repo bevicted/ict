@@ -182,16 +182,18 @@ func terraformCommand(ctx context.Context, environ []string, command string, arg
 
 // Runner wires filesystem and subprocess dependencies for a command invocation.
 type Runner struct {
-	Terraform   CommandRunner
-	IBMCloud    ibmcloud.Runner
-	Workspace   string
-	Environ     []string
-	Stdout      io.Writer
-	Stderr      io.Writer
-	Terminal    func() bool
-	Now         func() time.Time
-	Suffix      func() string
-	Materialize func(workspace string) error
+	Terraform       CommandRunner
+	IBMCloud        ibmcloud.Runner
+	Workspace       string
+	Environ         []string
+	Stdout          io.Writer
+	Stderr          io.Writer
+	Terminal        func() bool
+	Now             func() time.Time
+	Suffix          func() string
+	Materialize     func(workspace string) error
+	MaterializeAuth func(workspace string) error
+	AuthTimeout     time.Duration
 }
 
 func (r Runner) baseEnvironment() []string {
@@ -347,12 +349,19 @@ func (r Runner) Plan(ctx context.Context, stateID string, supplied Inputs, backe
 }
 
 // Apply reconstructs frozen inputs in fresh storage and performs a fresh auto-approved apply.
-func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string) error {
+func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string, authExport AuthExport) error {
+	if err := validateAuthExport(authExport); err != nil {
+		return err
+	}
 	result, err := r.loadOperationContext(stateID, contextPath, backend, resultPath)
 	if err != nil {
 		return err
 	}
-	return r.runOperation(ctx, "apply", result, resultPath)
+	if err := r.runOperation(ctx, "apply", result, resultPath); err != nil {
+		return err
+	}
+	r.exportPublicAuth(ctx, result, authExport)
+	return nil
 }
 
 // Destroy reconstructs frozen inputs in fresh storage and always asks the remote backend to destroy.
@@ -361,7 +370,11 @@ func (r Runner) Destroy(ctx context.Context, stateID, contextPath string, backen
 	if err != nil {
 		return err
 	}
-	return r.runOperation(ctx, "destroy", result, resultPath)
+	if err := r.runOperation(ctx, "destroy", result, resultPath); err != nil {
+		return err
+	}
+	r.cleanupAuth(ctx, result)
+	return nil
 }
 
 func (r Runner) loadOperationContext(stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string) (PlanResult, error) {

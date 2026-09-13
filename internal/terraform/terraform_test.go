@@ -37,6 +37,30 @@ func TestMaterializeOmitsRepositoryTestFiles(t *testing.T) {
 	}
 }
 
+func TestMaterializeAuthUsesPinnedIsolatedRoot(t *testing.T) {
+	workspace := t.TempDir()
+	if err := MaterializeAuth(workspace); err != nil {
+		t.Fatal(err)
+	}
+	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
+	if !strings.Contains(main, "ibm_container_cluster_config") || !strings.Contains(main, "endpoint_type     = \"public\"") || !strings.Contains(main, "public_service_endpoint") {
+		t.Fatalf("public auth root does not classify and export public config: %s", main)
+	}
+	lock := string(mustReadAuth(t, filepath.Join(workspace, ".terraform.lock.hcl")))
+	if !strings.Contains(lock, "version     = \"2.5.0\"") {
+		t.Fatalf("auth root does not pin provider: %s", lock)
+	}
+}
+
+func mustReadAuth(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestAtomicWriteIsPrivate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private", "runtime.json")
 	if err := AtomicWrite(path, []byte("value")); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,6 +46,10 @@ func (f *fakeTerraform) Run(_ context.Context, _ []string, _ io.Writer, _ io.Wri
 
 func (f *fakeTerraform) Output(context.Context, []string, string, ...string) ([]byte, error) {
 	return nil, errors.New("unexpected Terraform output call")
+}
+
+func (f *fakeTerraform) SensitiveOutput(_ context.Context, _ []string, _ string, args ...string) ([]byte, error) {
+	return nil, fmt.Errorf("unexpected sensitive Terraform output %q", args)
 }
 
 const testConfig = `version: 1
@@ -132,7 +137,7 @@ func TestPlanApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T) {
 	applyResult := filepath.Join(t.TempDir(), "apply-result.json")
 	applyFake := &fakeTerraform{}
 	applyRunner := newRunner(applyWorkspace, applyFake)
-	if err := applyRunner.Apply(context.Background(), "allocation-123", contextPath, backend, applyResult); err != nil {
+	if err := applyRunner.Apply(context.Background(), "allocation-123", contextPath, backend, applyResult, AuthExport{}); err != nil {
 		t.Fatal(err)
 	}
 	assertOperationCalls(t, applyFake.calls, applyWorkspace, "apply", backend)
@@ -179,7 +184,7 @@ func TestApplyDestroyRejectTamperingBeforeTerraform(t *testing.T) {
 			}
 			fake := &fakeTerraform{}
 			runner := newRunner(filepath.Join(t.TempDir(), "operation"), fake)
-			err := runner.Apply(context.Background(), test.stateID, path, test.backend, filepath.Join(t.TempDir(), "result.json"))
+			err := runner.Apply(context.Background(), test.stateID, path, test.backend, filepath.Join(t.TempDir(), "result.json"), AuthExport{})
 			if err == nil {
 				t.Fatal("tampered input was accepted")
 			}
@@ -219,7 +224,7 @@ func TestFailedApplyCanBeFollowedByDestroy(t *testing.T) {
 	backend := backendConfig()
 	contextPath := writePlanContext(t, backend)
 	applyFake := &fakeTerraform{applyErr: errors.New("apply failed")}
-	if err := newRunner(filepath.Join(t.TempDir(), "apply"), applyFake).Apply(context.Background(), "allocation-123", contextPath, backend, filepath.Join(t.TempDir(), "apply-result.json")); err == nil {
+	if err := newRunner(filepath.Join(t.TempDir(), "apply"), applyFake).Apply(context.Background(), "allocation-123", contextPath, backend, filepath.Join(t.TempDir(), "apply-result.json"), AuthExport{}); err == nil {
 		t.Fatal("apply unexpectedly succeeded")
 	}
 	destroyFake := &fakeTerraform{}
@@ -243,6 +248,9 @@ func writePlanContext(t *testing.T, backend ictterraform.BackendConfig) string {
 }
 
 func actionNames(calls [][]string) []string {
+	if len(calls) > 2 {
+		calls = calls[:2]
+	}
 	result := make([]string, 0, len(calls))
 	for _, call := range calls {
 		result = append(result, call[1])
@@ -254,8 +262,8 @@ func assertOperationCalls(t *testing.T, calls [][]string, workspace, operation s
 	t.Helper()
 	wantInit := append([]string{"-chdir=" + workspace, "init", "-input=false", "-no-color"}, backend.InitArgs()...)
 	want := [][]string{wantInit, {"-chdir=" + workspace, operation, "-input=false", "-no-color", "-auto-approve", "-var-file=" + filepath.Join(workspace, ictterraform.TFVarsName)}}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("Terraform calls = %#v, want %#v", calls, want)
+	if len(calls) < len(want) || !reflect.DeepEqual(calls[:len(want)], want) {
+		t.Fatalf("Terraform calls = %#v, want prefix %#v", calls, want)
 	}
 }
 

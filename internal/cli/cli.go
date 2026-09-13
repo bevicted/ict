@@ -61,11 +61,13 @@ type PlanCommand struct {
 
 // ApplyCommand uses only frozen planning metadata and a matching backend identity.
 type ApplyCommand struct {
-	StateID       string `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
-	ContextFile   string `name:"context-file" required:"" help:"Absolute path to strict frozen planning metadata JSON."`
-	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
-	ResultFile    string `name:"result-file" required:"" help:"Absolute path for the bounded apply result JSON."`
-	AutoApprove   bool   `name:"auto-approve" help:"Required acknowledgement for noninteractive apply."`
+	StateID          string `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
+	ContextFile      string `name:"context-file" required:"" help:"Absolute path to strict frozen planning metadata JSON."`
+	BackendConfig    string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
+	ResultFile       string `name:"result-file" required:"" help:"Absolute path for the bounded apply result JSON."`
+	AuthManifestFile string `name:"auth-manifest-file" help:"Absolute path for the bounded non-secret optional auth manifest JSON."`
+	AuthOutputDir    string `name:"auth-output-dir" help:"Absolute private directory for an optional exported kubeconfig."`
+	AutoApprove      bool   `name:"auto-approve" help:"Required acknowledgement for noninteractive apply."`
 }
 
 // DestroyCommand uses only frozen planning metadata and a matching backend identity.
@@ -151,7 +153,7 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 		if err != nil {
 			return err
 		}
-		return r.Workflow.Apply(ctx, command.Apply.StateID, command.Apply.ContextFile, backend, command.Apply.ResultFile)
+		return r.Workflow.Apply(ctx, command.Apply.StateID, command.Apply.ContextFile, backend, command.Apply.ResultFile, workflow.AuthExport{ManifestPath: command.Apply.AuthManifestFile, OutputDir: command.Apply.AuthOutputDir})
 	case "destroy <state-id>":
 		if err := validateStateID(command.Destroy.StateID); err != nil {
 			return err

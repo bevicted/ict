@@ -101,6 +101,24 @@ ict apply allocation-123 \
 
 ICT rejects omitted `--auto-approve`, malformed, unknown, or trailing JSON, changed lifecycle IDs, backend mismatch, changed canonical values, recomputed defaults or names, and credential fields before it initializes Terraform. It reconstructs canonical Terraform files in fresh task-local storage, initializes the exact frozen S3 backend, and runs `terraform apply -input=false -no-color -auto-approve` with the frozen tfvars. This intentionally makes a new Terraform plan; it does not consume or compare the disposable review plan.
 
+### Optional public admin export
+
+A caller can request a best-effort public admin kubeconfig only while applying:
+
+```sh
+ict apply allocation-123 \
+  --context-file /run/ict/context.json \
+  --backend-config /run/ict/backend.json \
+  --result-file /run/ict/apply-result.json \
+  --auth-manifest-file /run/ict/auth-manifest.json \
+  --auth-output-dir /run/ict/auth \
+  --auto-approve
+```
+
+Both auth paths are required together. ICT applies infrastructure first, then uses isolated companion state at `<backend-key>.auth` to inspect the actual cluster endpoint and retrieve an admin config only when it is public-accessible and non-Satellite. The private `kubeconfig.yaml` is atomically written with mode `0600`; it embeds its certificate authority and client credentials and rejects exec plugins, tokens, and local credential references. The manifest is bounded non-secret JSON containing only availability and artifact names.
+
+Private-only clusters and Satellite clusters return a safe `unsupported` manifest and do not export a public kubeconfig. Retrieval, validation, timeout, cancellation, or output failures return `unavailable` without changing the successful infrastructure apply result. ICT does not retry, renew, or recover a failed export. Destroy attempts companion-state cleanup with refresh disabled after infrastructure destroy; that best-effort cleanup never prevents infrastructure cleanup.
+
 ### Destroy
 
 `destroy` also accepts no replacement cluster inputs:
