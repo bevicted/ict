@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ type AuthExport struct {
 type AuthManifest struct {
 	Version      int            `json:"version"`
 	Availability string         `json:"availability"`
+	Reason       string         `json:"reason,omitempty"`
 	Artifacts    []AuthArtifact `json:"artifacts,omitempty"`
 }
 
@@ -147,58 +149,58 @@ func (r Runner) exportPublicAuth(ctx context.Context, result PlanResult, export 
 		return
 	}
 	if err := os.MkdirAll(export.OutputDir, 0o700); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "output-directory")
 		return
 	}
 	authCtx, cancel := context.WithTimeout(ctx, r.authTimeout())
 	defer cancel()
 	workspace, err := os.MkdirTemp("", "ict-auth-")
 	if err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "workspace")
 		return
 	}
 	defer os.RemoveAll(workspace)
 	if err := os.Chmod(workspace, 0o700); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "workspace-permissions")
 		return
 	}
 	if err := r.materializeAuth(workspace); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "assets")
 		return
 	}
 	configDir := filepath.Join(workspace, "credentials")
 	if err := os.Mkdir(configDir, 0o700); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "credentials-directory")
 		return
 	}
 	tfvars, err := authTFVars(result.Values, configDir)
 	if err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "variables")
 		return
 	}
 	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
 	if err := ictterraform.AtomicWrite(tfvarsPath, tfvars); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "variables-write")
 		return
 	}
 	if err := ictterraform.MaterializeBackend(workspace); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "backend")
 		return
 	}
 	backend := authBackend(result.Backend)
 	environment := r.authEnvironment(result.Recovery.Endpoints)
 	initArgs := append([]string{"-chdir=" + workspace, "init", "-input=false", "-no-color"}, backend.InitArgs()...)
 	if err := r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", initArgs...); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "terraform-init")
 		return
 	}
 	if err := r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", "-chdir="+workspace, "apply", "-input=false", "-no-color", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "terraform-apply")
 		return
 	}
 	available, err := r.authOutput(authCtx, environment, workspace, "public_available")
 	if err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "public-availability")
 		return
 	}
 	switch available {
@@ -208,36 +210,51 @@ func (r Runner) exportPublicAuth(ctx context.Context, result PlanResult, export 
 		_ = writeAuthManifest(export.ManifestPath, manifest)
 		return
 	default:
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "public-availability")
 		return
 	}
 	endpoint, err := r.authOutput(authCtx, environment, workspace, "public_endpoint")
 	if err != nil || endpoint == "" {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "public-endpoint")
 		return
 	}
-	configPath, err := r.authOutput(authCtx, environment, workspace, "kubeconfig_path")
-	if err != nil || configPath == "" || !filepath.IsAbs(configPath) {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+	ca, err := r.authOutput(authCtx, environment, workspace, "public_ca_certificate")
+	if err != nil {
+		r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
 		return
 	}
-	relativeConfigPath, err := filepath.Rel(configDir, configPath)
-	if err != nil || relativeConfigPath == ".." || strings.HasPrefix(relativeConfigPath, ".."+string(filepath.Separator)) {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+	certificate, err := r.authOutput(authCtx, environment, workspace, "public_admin_certificate")
+	if err != nil {
+		r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
 		return
 	}
-	contents, err := os.ReadFile(configPath)
+	key, err := r.authOutput(authCtx, environment, workspace, "public_admin_key")
+	if err != nil {
+		r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
+		return
+	}
+	contents, err := renderKubeconfig(endpoint, ca, certificate, key)
 	if err != nil || validateKubeconfig(contents, endpoint) != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-render")
 		return
 	}
 	if err := ictterraform.AtomicWrite(filepath.Join(export.OutputDir, "kubeconfig.yaml"), contents); err != nil {
-		_ = writeAuthManifest(export.ManifestPath, manifest)
+		r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-write")
 		return
 	}
 	manifest.Availability = "available"
 	manifest.Artifacts = []AuthArtifact{{Name: "kubeconfig.yaml"}}
 	_ = writeAuthManifest(export.ManifestPath, manifest)
+}
+
+func (r Runner) unavailableAuth(path string, manifest AuthManifest, reason string) {
+	manifest.Reason = reason
+	var diagnostic strings.Builder
+	diagnostic.WriteString("ict: public auth unavailable: ")
+	diagnostic.WriteString(reason)
+	diagnostic.WriteByte('\n')
+	_, _ = io.WriteString(r.stderr(), diagnostic.String())
+	_ = writeAuthManifest(path, manifest)
 }
 
 func (r Runner) authOutput(ctx context.Context, environ []string, workspace, name string) (string, error) {
@@ -320,6 +337,24 @@ func writeAuthManifest(path string, manifest AuthManifest) error {
 		return err
 	}
 	return nil
+}
+
+func renderKubeconfig(endpoint, ca, certificate, key string) ([]byte, error) {
+	if endpoint == "" || ca == "" || certificate == "" || key == "" {
+		return nil, errors.New("incomplete public admin material")
+	}
+	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	var contents strings.Builder
+	contents.WriteString("apiVersion: v1\nkind: Config\nclusters:\n- name: cluster\n  cluster:\n    certificate-authority-data: ")
+	contents.WriteString(encode(ca))
+	contents.WriteString("\n    server: ")
+	contents.WriteString(endpoint)
+	contents.WriteString("\ncontexts:\n- name: admin@cluster\n  context:\n    cluster: cluster\n    user: admin\ncurrent-context: admin@cluster\nusers:\n- name: admin\n  user:\n    client-certificate-data: ")
+	contents.WriteString(encode(certificate))
+	contents.WriteString("\n    client-key-data: ")
+	contents.WriteString(encode(key))
+	contents.WriteByte('\n')
+	return []byte(contents.String()), nil
 }
 
 func validateKubeconfig(contents []byte, endpoint string) error {

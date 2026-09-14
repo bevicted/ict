@@ -43,7 +43,20 @@ output "public_endpoint" {
   value = data.ibm_container_cluster.target.public_service_endpoint_url
 }
 
-output "kubeconfig_path" {
-  value     = try(data.ibm_container_cluster_config.public_admin[0].config_file_path, "")
+# The provider downloads a config file which refers to sibling PEM files. Export
+# the credential material directly so the workflow can render one self-contained
+# kubeconfig without copying those local references.
+output "public_ca_certificate" {
+  value     = try(data.ibm_container_cluster_config.public_admin[0].ca_certificate, "")
+  sensitive = true
+}
+
+output "public_admin_certificate" {
+  value     = try(data.ibm_container_cluster_config.public_admin[0].admin_certificate, "")
+  sensitive = true
+}
+
+output "public_admin_key" {
+  value     = try(data.ibm_container_cluster_config.public_admin[0].admin_key, "")
   sensitive = true
 }

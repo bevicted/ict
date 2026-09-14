@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,7 +19,6 @@ type authTerraform struct {
 	calls            [][]string
 	sensitiveCalls   [][]string
 	outputs          map[string]string
-	kubeconfig       []byte
 	blockAuthApply   bool
 	workspaceForPlan string
 }
@@ -28,30 +28,6 @@ func (f *authTerraform) Run(ctx context.Context, _ []string, _ io.Writer, _ io.W
 	if f.blockAuthApply && len(args) > 1 && args[1] == "apply" && strings.Contains(args[0], "ict-auth-") {
 		<-ctx.Done()
 		return ctx.Err()
-	}
-	if len(f.kubeconfig) > 0 && len(args) > 1 && args[1] == "apply" && strings.Contains(args[0], "ict-auth-") {
-		for _, arg := range args {
-			if !strings.HasPrefix(arg, "-var-file=") {
-				continue
-			}
-			data, err := os.ReadFile(strings.TrimPrefix(arg, "-var-file="))
-			if err != nil {
-				return err
-			}
-			var values struct {
-				ConfigDir string `json:"config_dir"`
-			}
-			if err := json.Unmarshal(data, &values); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(values.ConfigDir, "config.yml"), f.kubeconfig, 0o600); err != nil {
-				return err
-			}
-			if f.outputs == nil {
-				f.outputs = map[string]string{}
-			}
-			f.outputs["kubeconfig_path"] = filepath.Join(values.ConfigDir, "config.yml")
-		}
 	}
 	if len(args) > 1 && args[1] == "plan" {
 		return os.WriteFile(filepath.Join(f.workspaceForPlan, ictterraform.PlanName), []byte("saved plan"), 0o600)
@@ -101,11 +77,16 @@ func authContext(t *testing.T, backend ictterraform.BackendConfig, mode string) 
 	return path
 }
 
-func TestApplyExportsPublicKubeconfigWithoutCredentialsInManifest(t *testing.T) {
+func TestApplyRendersPublicKubeconfigFromProviderCertificateOutputs(t *testing.T) {
 	backend := backendConfig()
 	contextPath := authContext(t, backend, "vpc")
-	contents := []byte("apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: Y2E=\n    server: https://api.public.example.invalid\nusers:\n- name: admin\n  user:\n    client-certificate-data: Y2VydA==\n    client-key-data: cHJpdmF0ZS1rZXk=\n")
-	fake := &authTerraform{outputs: map[string]string{"public_available": "true", "public_endpoint": "https://api.public.example.invalid"}, kubeconfig: contents}
+	fake := &authTerraform{outputs: map[string]string{
+		"public_available":         "true",
+		"public_endpoint":          "https://api.public.example.invalid",
+		"public_ca_certificate":    "synthetic-ca",
+		"public_admin_certificate": "synthetic-certificate",
+		"public_admin_key":         "synthetic-private-key",
+	}}
 	resultPath := filepath.Join(t.TempDir(), "apply-result.json")
 	manifestPath := filepath.Join(t.TempDir(), "auth-manifest.json")
 	outputDir := filepath.Join(t.TempDir(), "auth")
@@ -119,15 +100,16 @@ func TestApplyExportsPublicKubeconfigWithoutCredentialsInManifest(t *testing.T) 
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Version != 1 || manifest.Availability != "available" || len(manifest.Artifacts) != 1 || manifest.Artifacts[0].Name != "kubeconfig.yaml" || strings.Contains(string(data), "private-key") {
+	if manifest.Version != 1 || manifest.Availability != "available" || manifest.Reason != "" || len(manifest.Artifacts) != 1 || manifest.Artifacts[0].Name != "kubeconfig.yaml" || strings.Contains(string(data), "synthetic-private-key") {
 		t.Fatalf("manifest = %s", data)
 	}
 	exported := filepath.Join(outputDir, "kubeconfig.yaml")
 	info, err := os.Stat(exported)
-	if err != nil || info.Mode().Perm() != 0o600 || string(mustRead(t, exported)) != string(contents) {
-		t.Fatalf("exported kubeconfig = %v, %v", info, err)
+	contents := string(mustRead(t, exported))
+	if err != nil || info.Mode().Perm() != 0o600 || validateKubeconfig([]byte(contents), "https://api.public.example.invalid") != nil || strings.Contains(contents, "certificate-authority:") || strings.Contains(contents, "client-certificate:") || strings.Contains(contents, "client-key:") {
+		t.Fatalf("exported kubeconfig is not self-contained: %v, %v", info, err)
 	}
-	if len(fake.sensitiveCalls) != 3 || fake.sensitiveCalls[2][len(fake.sensitiveCalls[2])-1] != "kubeconfig_path" {
+	if len(fake.sensitiveCalls) != 5 || fake.sensitiveCalls[4][len(fake.sensitiveCalls[4])-1] != "public_admin_key" {
 		t.Fatalf("sensitive calls = %#v", fake.sensitiveCalls)
 	}
 	if !strings.Contains(strings.Join(fake.calls[2], " "), "key=allocations/cluster-123.tfstate.auth") {
@@ -202,14 +184,18 @@ func TestApplyAuthFailurePreservesInfrastructureSuccess(t *testing.T) {
 	resultPath := filepath.Join(t.TempDir(), "apply-result.json")
 	manifestPath := filepath.Join(t.TempDir(), "auth-manifest.json")
 	outputDir := filepath.Join(t.TempDir(), "auth")
-	runner := Runner{Workspace: filepath.Join(t.TempDir(), "apply"), Terraform: fake, Terminal: func() bool { return false }, AuthTimeout: time.Millisecond}
+	var stderr bytes.Buffer
+	runner := Runner{Workspace: filepath.Join(t.TempDir(), "apply"), Terraform: fake, Terminal: func() bool { return false }, AuthTimeout: time.Millisecond, Stderr: &stderr}
 	if err := runner.Apply(context.Background(), "allocation-123", contextPath, backend, resultPath, AuthExport{ManifestPath: manifestPath, OutputDir: outputDir}); err != nil {
 		t.Fatal(err)
 	}
 	assertOperationResult(t, resultPath, "apply", runner.Workspace)
 	var manifest AuthManifest
-	if err := json.Unmarshal(mustRead(t, manifestPath), &manifest); err != nil || manifest.Availability != "unavailable" || len(manifest.Artifacts) != 0 {
+	if err := json.Unmarshal(mustRead(t, manifestPath), &manifest); err != nil || manifest.Availability != "unavailable" || manifest.Reason != "terraform-apply" || len(manifest.Artifacts) != 0 {
 		t.Fatalf("manifest = %#v, %v", manifest, err)
+	}
+	if stderr.String() != "ict: public auth unavailable: terraform-apply\n" {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(outputDir, "kubeconfig.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("failed export wrote an artifact: %v", err)
