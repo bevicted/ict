@@ -43,8 +43,8 @@ func TestMaterializeAuthUsesPinnedIsolatedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
-	if !strings.Contains(main, "ibm_container_cluster_config") || !strings.Contains(main, "public_service_endpoint") {
-		t.Fatalf("public auth root does not classify and export public config: %s", main)
+	if !strings.Contains(main, "ibm_container_cluster_config") || !strings.Contains(main, "ibm_container_vpc_cluster") || !strings.Contains(main, "ibm_container_cluster") || !strings.Contains(main, "public_service_endpoint") {
+		t.Fatalf("public auth root does not select the cluster provider and export public config: %s", main)
 	}
 	if strings.Contains(main, "endpoint_type") {
 		t.Fatalf("public auth root must use the provider's default public endpoint: %s", main)

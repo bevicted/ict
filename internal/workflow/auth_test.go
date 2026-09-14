@@ -236,6 +236,25 @@ func TestDestroyAuthCleanupIsBestEffortAndUsesCompanionState(t *testing.T) {
 	}
 }
 
+func TestAuthTFVarsSelectsClusterProvider(t *testing.T) {
+	data, err := authTFVars(Values{
+		ClusterName:       "allocation-123",
+		ClusterMode:       "vpc",
+		ResourceGroupName: "test-group",
+		Region:            "test-region",
+	}, "/tmp/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var variables map[string]any
+	if err := json.Unmarshal(data, &variables); err != nil {
+		t.Fatal(err)
+	}
+	if variables["cluster_mode"] != "vpc" {
+		t.Fatalf("cluster_mode = %v", variables["cluster_mode"])
+	}
+}
+
 func slicesContains(values []string, wanted string) bool {
 	for _, value := range values {
 		if value == wanted {

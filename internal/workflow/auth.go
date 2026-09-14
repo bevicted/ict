@@ -314,10 +314,11 @@ func authBackend(backend ictterraform.BackendConfig) ictterraform.BackendConfig 
 func authTFVars(values Values, configDir string) ([]byte, error) {
 	data, err := json.Marshal(struct {
 		ClusterName       string `json:"cluster_name"`
+		ClusterMode       string `json:"cluster_mode"`
 		ResourceGroupName string `json:"resource_group_name"`
 		Region            string `json:"region"`
 		ConfigDir         string `json:"config_dir"`
-	}{values.ClusterName, values.ResourceGroupName, values.Region, configDir})
+	}{values.ClusterName, values.ClusterMode, values.ResourceGroupName, values.Region, configDir})
 	if err != nil {
 		return nil, err
 	}

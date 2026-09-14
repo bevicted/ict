@@ -19,27 +19,42 @@ data "ibm_resource_group" "selected" {
 
 # This data source supplies the actual public-endpoint decision. A missing public
 # endpoint leaves the credential data source uninstantiated.
+data "ibm_container_vpc_cluster" "target" {
+  count = var.cluster_mode == "vpc" ? 1 : 0
+
+  name              = var.cluster_name
+  resource_group_id = data.ibm_resource_group.selected.id
+}
+
 data "ibm_container_cluster" "target" {
+  count = var.cluster_mode == "classic" ? 1 : 0
+
   name                  = var.cluster_name
   resource_group_id     = data.ibm_resource_group.selected.id
   list_bounded_services = false
 }
 
-data "ibm_container_cluster_config" "public_admin" {
-  count = data.ibm_container_cluster.target.public_service_endpoint ? 1 : 0
+locals {
+  cluster_id       = var.cluster_mode == "vpc" ? data.ibm_container_vpc_cluster.target[0].id : data.ibm_container_cluster.target[0].id
+  public_available = var.cluster_mode == "vpc" ? data.ibm_container_vpc_cluster.target[0].public_service_endpoint : data.ibm_container_cluster.target[0].public_service_endpoint
+  public_endpoint  = var.cluster_mode == "vpc" ? data.ibm_container_vpc_cluster.target[0].public_service_endpoint_url : data.ibm_container_cluster.target[0].public_service_endpoint_url
+}
 
-  cluster_name_id   = data.ibm_container_cluster.target.id
+data "ibm_container_cluster_config" "public_admin" {
+  count = local.public_available ? 1 : 0
+
+  cluster_name_id   = local.cluster_id
   resource_group_id = data.ibm_resource_group.selected.id
   admin             = true
   config_dir        = var.config_dir
 }
 
 output "public_available" {
-  value = data.ibm_container_cluster.target.public_service_endpoint
+  value = local.public_available
 }
 
 output "public_endpoint" {
-  value = data.ibm_container_cluster.target.public_service_endpoint_url
+  value = local.public_endpoint
 }
 
 # The provider downloads a config file which refers to sibling PEM files. Export
