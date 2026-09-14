@@ -43,8 +43,11 @@ func TestMaterializeAuthUsesPinnedIsolatedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
-	if !strings.Contains(main, "ibm_container_cluster_config") || !strings.Contains(main, "endpoint_type     = \"public\"") || !strings.Contains(main, "public_service_endpoint") {
+	if !strings.Contains(main, "ibm_container_cluster_config") || !strings.Contains(main, "public_service_endpoint") {
 		t.Fatalf("public auth root does not classify and export public config: %s", main)
+	}
+	if strings.Contains(main, "endpoint_type") {
+		t.Fatalf("public auth root must use the provider's default public endpoint: %s", main)
 	}
 	lock := string(mustReadAuth(t, filepath.Join(workspace, ".terraform.lock.hcl")))
 	if !strings.Contains(lock, "version     = \"2.5.0\"") {

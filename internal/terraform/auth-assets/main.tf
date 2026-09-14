@@ -31,7 +31,6 @@ data "ibm_container_cluster_config" "public_admin" {
   cluster_name_id   = data.ibm_container_cluster.target.id
   resource_group_id = data.ibm_resource_group.selected.id
   admin             = true
-  endpoint_type     = "public"
   config_dir        = var.config_dir
 }
 
