@@ -55,6 +55,8 @@ type Inputs struct {
 	ResourceGroup                  string
 	Zone                           string
 	Flavor                         string
+	AccountID                      string
+	VPCRegion                      string
 	VPCID                          string
 	SubnetIDs                      []string
 	PublicGatewayIDs               []string
@@ -106,6 +108,8 @@ type Values struct {
 	WorkerCount                    int         `json:"worker_count"`
 	Zone                           string      `json:"zone,omitempty"`
 	Flavor                         string      `json:"flavor,omitempty"`
+	AccountID                      string      `json:"account_id,omitempty"`
+	VPCRegion                      string      `json:"vpc_region,omitempty"`
 	VPCID                          string      `json:"vpc_id,omitempty"`
 	SubnetIDs                      []string    `json:"subnet_ids,omitempty"`
 	PublicGatewayIDs               []string    `json:"public_gateway_ids,omitempty"`
@@ -648,6 +652,9 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid name %q", name)
 		}
 		region := zoneRegion(supplied.Zone)
+		if supplied.VPCRegion != "" && supplied.VPCRegion != region {
+			return Values{}, config.ResolvedTarget{}, errors.New("VPC region does not match zone")
+		}
 		target, err := cfg.ResolveTargetForRegion(supplied.Target, region, r.baseEnvironment())
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
@@ -660,7 +667,7 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 			policy := supplied.AuthPolicy
 			authPolicy = &policy
 		}
-		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), AuthPolicy: authPolicy}, target, nil
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor, AccountID: supplied.AccountID, VPCRegion: supplied.VPCRegion, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), AuthPolicy: authPolicy}, target, nil
 	case config.ProviderClassic:
 		if !datacenterPattern.MatchString(supplied.Datacenter) {
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid datacenter %q", supplied.Datacenter)
@@ -1554,7 +1561,7 @@ func validateRecoveryValues(values Values, fingerprint string) (config.Provider,
 
 	switch values.ClusterMode {
 	case "vpc":
-		if !zonePattern.MatchString(values.Zone) || zoneRegion(values.Zone) != values.Region || !flavorPattern.MatchString(values.Flavor) || !vpcClusterPattern.MatchString(values.ClusterName) || !validVPCReuseValues(values) || fingerprint != "" || !emptyValues(values, "vpc") {
+		if !zonePattern.MatchString(values.Zone) || zoneRegion(values.Zone) != values.Region || values.VPCRegion != "" && values.VPCRegion != values.Region || !flavorPattern.MatchString(values.Flavor) || !vpcClusterPattern.MatchString(values.ClusterName) || !validVPCReuseValues(values) || fingerprint != "" || !emptyValues(values, "vpc") {
 			return "", errors.New("invalid recovery values")
 		}
 		return config.ProviderVPCGen2, nil
@@ -1603,9 +1610,9 @@ func emptyValues(values Values, provider string) bool {
 	case "vpc":
 		return values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
 	case "classic":
-		return values.AuthPolicy == nil && values.Zone == "" && values.Flavor == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
+		return values.AuthPolicy == nil && values.Zone == "" && values.Flavor == "" && values.AccountID == "" && values.VPCRegion == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
 	case "satellite":
-		return values.AuthPolicy == nil && values.Zone == "" && values.Flavor == "" && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
+		return values.AuthPolicy == nil && values.Zone == "" && values.Flavor == "" && values.AccountID == "" && values.VPCRegion == "" && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
 	default:
 		return false
 	}

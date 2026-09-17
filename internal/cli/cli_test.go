@@ -103,13 +103,17 @@ func TestCLIDestroyReportsSanitizedCompanionCleanupFailure(t *testing.T) {
 	}
 	contextPath, resultPath := filepath.Join(t.TempDir(), "context.json"), filepath.Join(t.TempDir(), "destroy.json")
 	fixture := &cleanupTerraform{cleanup: errors.New("provider stale secret 404 synthetic detail")}
-	planArgs := []string{"plan", "allocation-123", "--config", configPath, "--target", "example", "--provider", "vpc-gen2", "--platform", "kubernetes", "--version", "1.31.9", "--resource-group", "fixture-group", "--zone", "us-south-1", "--flavor", "bx2.2x8", "--name", "fixture-cluster", "--backend-config", backendPath, "--result-file", contextPath, "--auth-allocation-uid", "allocation-123", "--auth-vpn-server-id", "vpn-1", "--auth-secrets-manager-id", "sm-1", "--auth-secrets-manager-region", "eu-gb", "--auth-secret-group-id", "group-1", "--auth-certificate-template", "client-template", "--auth-issuer", "issuer-1", "--auth-ttl", "168h"}
+	planArgs := []string{"plan", "allocation-123", "--config", configPath, "--target", "example", "--provider", "vpc-gen2", "--platform", "kubernetes", "--version", "1.31.9", "--resource-group", "fixture-group", "--zone", "us-south-1", "--vpc-region", "us-south", "--account-id", "account-1", "--flavor", "bx2.2x8", "--name", "fixture-cluster", "--backend-config", backendPath, "--result-file", contextPath, "--auth-allocation-uid", "allocation-123", "--auth-vpn-server-id", "vpn-1", "--auth-secrets-manager-id", "sm-1", "--auth-secrets-manager-region", "eu-gb", "--auth-secret-group-id", "group-1", "--auth-certificate-template", "client-template", "--auth-issuer", "issuer-1", "--auth-ttl", "168h"}
 	parsed, command, err := Parse(planArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := (Runner{Workflow: workflow.Runner{Workspace: filepath.Join(t.TempDir(), "plan"), Terraform: fixture, Terminal: func() bool { return false }}}).Run(context.Background(), parsed, command); err != nil {
 		t.Fatal(err)
+	}
+	planned, err := workflow.ReadPlanResult(contextPath)
+	if err != nil || planned.Values.AccountID != "account-1" || planned.Values.VPCRegion != "us-south" || planned.Recovery.Values.AuthPolicy == nil {
+		t.Fatalf("frozen auth/network handoff = %+v, %v", planned, err)
 	}
 	if err := os.WriteFile(configPath, []byte("changed defaults are not destroy inputs\n"), 0o600); err != nil {
 		t.Fatal(err)
