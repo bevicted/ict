@@ -110,7 +110,7 @@ func TestResolveNamePrefixingAndLimits(t *testing.T) {
 	}
 }
 
-func TestPlanApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T) {
+func TestPlanReviewApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T) {
 	backend := backendConfig()
 	planWorkspace := filepath.Join(t.TempDir(), "plan")
 	contextPath := filepath.Join(t.TempDir(), "context.json")
@@ -131,6 +131,24 @@ func TestPlanApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T) {
 	}
 	if strings.Contains(string(mustRead(t, contextPath)), "AWS_SECRET_ACCESS_KEY") {
 		t.Fatal("context contains credentials")
+	}
+
+	reviewWorkspace := filepath.Join(t.TempDir(), "review")
+	reviewResult := filepath.Join(t.TempDir(), "review-result.json")
+	reviewFake := &fakeTerraform{}
+	reviewRunner := newRunner(reviewWorkspace, reviewFake)
+	if err := reviewRunner.Review(context.Background(), "allocation-123", contextPath, backend, reviewResult); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := actionNames(reviewFake.calls), []string{"init", "plan"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("review actions = %#v, want %#v", got, want)
+	}
+	fresh, err := ReadPlanResult(reviewResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.PlanPath != filepath.Join(reviewWorkspace, ictterraform.PlanName) || !reflect.DeepEqual(fresh.Values, handoff.Values) || !reflect.DeepEqual(fresh.Recovery, handoff.Recovery) || !reflect.DeepEqual(fresh.Backend, backend) {
+		t.Fatalf("fresh review = %#v", fresh)
 	}
 
 	applyWorkspace := filepath.Join(t.TempDir(), "apply")

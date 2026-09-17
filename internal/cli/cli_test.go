@@ -21,6 +21,13 @@ func TestSplitLifecycleGrammarRejectsCreate(t *testing.T) {
 	if parsed.Command() != "plan <state-id>" || command.Plan.StateID != "fixture" || command.Plan.Provider != "vpc-gen2" || command.Plan.BackendConfig != backendPath || command.Plan.ResultFile != contextPath {
 		t.Fatalf("plan = %#v", command.Plan)
 	}
+	parsed, command, err = Parse([]string{"review", "fixture", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Command() != "review <state-id>" || command.Review.StateID != "fixture" || command.Review.ContextFile != contextPath || command.Review.BackendConfig != backendPath || command.Review.ResultFile != resultPath {
+		t.Fatalf("review = %#v", command.Review)
+	}
 	manifestPath := filepath.Join(t.TempDir(), "auth-manifest.json")
 	outputDir := filepath.Join(t.TempDir(), "auth")
 	parsed, command, err = Parse([]string{"apply", "fixture", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath, "--auth-manifest-file", manifestPath, "--auth-output-dir", outputDir, "--auto-approve"})
@@ -41,6 +48,7 @@ func TestSplitLifecycleGrammarRejectsCreate(t *testing.T) {
 		{"create", "fixture"},
 		{"plan"},
 		{"plan", "fixture", "--backend-config", backendPath},
+		{"review", "fixture", "--context-file", contextPath, "--backend-config", backendPath},
 		{"apply", "fixture", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath, "--name", "replacement"},
 		{"destroy", "fixture", "--context-file", contextPath, "--backend-config", backendPath},
 	} {
@@ -71,6 +79,7 @@ func TestLifecycleRejectsInvalidStateIDBeforeWorkflow(t *testing.T) {
 	resultPath := filepath.Join(t.TempDir(), "result.json")
 	for _, args := range [][]string{
 		{"plan", "../outside", "--backend-config", backendPath, "--result-file", contextPath},
+		{"review", "../outside", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath},
 		{"apply", "../outside", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath, "--auto-approve"},
 		{"destroy", "../outside", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath},
 	} {

@@ -351,6 +351,15 @@ func (r Runner) Plan(ctx context.Context, stateID string, supplied Inputs, backe
 
 const defaultInfrastructureTimeout = 95 * time.Minute
 
+// Review reconstructs frozen inputs in fresh storage and writes a disposable plan for inspection.
+func (r Runner) Review(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string) error {
+	result, err := r.loadOperationContext(stateID, contextPath, backend, resultPath)
+	if err != nil {
+		return err
+	}
+	return r.runReview(ctx, result, resultPath)
+}
+
 // Apply reconstructs frozen inputs in fresh storage and performs a fresh auto-approved apply.
 func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string, authExport AuthExport) error {
 	if err := validateAuthExport(authExport); err != nil {
@@ -407,6 +416,49 @@ func (r Runner) loadOperationContext(stateID, contextPath string, backend ictter
 		return PlanResult{}, errors.New("frozen context backend does not match backend configuration")
 	}
 	return result, nil
+}
+
+func (r Runner) runReview(ctx context.Context, result PlanResult, resultPath string) error {
+	workspace, err := r.operationWorkspace()
+	if err != nil {
+		return err
+	}
+	tfvarsData, err := marshalJSON(result.Values)
+	if err != nil {
+		return err
+	}
+	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
+	if err := ictterraform.AtomicWrite(tfvarsPath, tfvarsData); err != nil {
+		return fmt.Errorf("write runtime values: %w", err)
+	}
+	if err := r.materialize(workspace); err != nil {
+		return err
+	}
+	if err := ictterraform.MaterializeBackend(workspace); err != nil {
+		return fmt.Errorf("materialize Terraform backend: %w", err)
+	}
+	environment := r.environment(config.ResolvedTarget{Target: config.Target{Endpoints: result.Recovery.Endpoints}}.Environment())
+	if result.Values.ClusterMode == "classic" {
+		if err := requireClassicCredentials(r.baseEnvironment()); err != nil {
+			return err
+		}
+	}
+	initArgs := append([]string{"-chdir=" + workspace, "init", "-input=false", "-no-color"}, result.Backend.InitArgs()...)
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", initArgs...); err != nil {
+		return err
+	}
+	planPath := filepath.Join(workspace, ictterraform.PlanName)
+	if err := r.terraform().Run(ctx, environment, r.stdout(), r.stderr(), "terraform", "-chdir="+workspace, "plan", "-input=false", "-no-color", "-out="+ictterraform.PlanName, "-var-file="+tfvarsPath); err != nil {
+		return err
+	}
+	if err := os.Chmod(planPath, 0o600); err != nil {
+		return fmt.Errorf("protect saved Terraform plan: %w", err)
+	}
+	result.PlanPath = planPath
+	if err := writeJSON(resultPath, result); err != nil {
+		return fmt.Errorf("write fresh plan result: %w", err)
+	}
+	return nil
 }
 
 func (r Runner) runOperation(ctx context.Context, operation string, result PlanResult, resultPath string) error {

@@ -14,6 +14,7 @@ import (
 // CLI is the root command grammar.
 type CLI struct {
 	Plan    PlanCommand    `cmd:"" help:"Resolve inputs and create a disposable remote-backend Terraform plan."`
+	Review  ReviewCommand  `cmd:"" help:"Create a fresh disposable plan from frozen planning metadata."`
 	Apply   ApplyCommand   `cmd:"" help:"Apply frozen planning metadata with a fresh Terraform plan and --auto-approve."`
 	Destroy DestroyCommand `cmd:"" help:"Destroy remote Terraform state from frozen planning metadata."`
 	Config  ConfigCommand  `cmd:"" help:"Inspect effective configuration."`
@@ -57,6 +58,14 @@ type PlanCommand struct {
 	VPCCommand    `embed:""`
 	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
 	ResultFile    string `name:"result-file" required:"" help:"Absolute path for strict frozen planning metadata JSON."`
+}
+
+// ReviewCommand uses only frozen planning metadata and a matching backend identity.
+type ReviewCommand struct {
+	StateID       string `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
+	ContextFile   string `name:"context-file" required:"" help:"Absolute path to strict frozen planning metadata JSON."`
+	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
+	ResultFile    string `name:"result-file" required:"" help:"Absolute path for strict fresh planning metadata JSON."`
 }
 
 // ApplyCommand uses only frozen planning metadata and a matching backend identity.
@@ -142,6 +151,15 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 			return err
 		}
 		return r.Workflow.Plan(ctx, command.Plan.StateID, command.Plan.inputs(), backend, command.Plan.ResultFile)
+	case "review <state-id>":
+		if err := validateStateID(command.Review.StateID); err != nil {
+			return err
+		}
+		backend, err := ictterraform.LoadBackendConfig(command.Review.BackendConfig)
+		if err != nil {
+			return err
+		}
+		return r.Workflow.Review(ctx, command.Review.StateID, command.Review.ContextFile, backend, command.Review.ResultFile)
 	case "apply <state-id>":
 		if !command.Apply.AutoApprove {
 			return fmt.Errorf("apply requires --auto-approve")
