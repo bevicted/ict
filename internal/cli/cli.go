@@ -51,6 +51,14 @@ type VPCCommand struct {
 	Owner                          string   `help:"Owner used when generating a name." env:"ICT_OWNER"`
 	Prefix                         string   `help:"Prefix used when generating a name." env:"ICT_PREFIX"`
 	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
+	AuthAllocationUID              string   `name:"auth-allocation-uid" help:"Frozen allocation identity for optional VPC VPN authentication." env:"ICT_AUTH_ALLOCATION_UID"`
+	AuthVPNServerID                string   `name:"auth-vpn-server-id" help:"Frozen existing VPN server ID." env:"ICT_AUTH_VPN_SERVER_ID"`
+	AuthSecretsManagerID           string   `name:"auth-secrets-manager-id" help:"Frozen existing Secrets Manager instance ID." env:"ICT_AUTH_SECRETS_MANAGER_ID"`
+	AuthSecretsManagerRegion       string   `name:"auth-secrets-manager-region" help:"Frozen Secrets Manager region." env:"ICT_AUTH_SECRETS_MANAGER_REGION"`
+	AuthSecretGroupID              string   `name:"auth-secret-group-id" help:"Frozen existing Secrets Manager secret group ID." env:"ICT_AUTH_SECRET_GROUP_ID"`
+	AuthCertificateTemplate        string   `name:"auth-certificate-template" help:"Frozen existing client certificate template." env:"ICT_AUTH_CERTIFICATE_TEMPLATE"`
+	AuthIssuer                     string   `name:"auth-issuer" help:"Frozen existing client certificate issuer." env:"ICT_AUTH_ISSUER"`
+	AuthTTL                        string   `name:"auth-ttl" help:"Frozen VPN certificate TTL." env:"ICT_AUTH_TTL"`
 }
 
 // PlanCommand contains planning inputs plus non-secret backend and result locations.
@@ -202,5 +210,5 @@ func validateStateID(stateID string) error {
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Prefix: c.Prefix, Name: c.Name}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Prefix: c.Prefix, Name: c.Name, AuthPolicy: workflow.AuthPolicy{AllocationUID: c.AuthAllocationUID, VPNServerID: c.AuthVPNServerID, SecretsManagerID: c.AuthSecretsManagerID, SecretsManagerRegion: c.AuthSecretsManagerRegion, SecretGroupID: c.AuthSecretGroupID, CertificateTemplate: c.AuthCertificateTemplate, Issuer: c.AuthIssuer, TTL: c.AuthTTL}}
 }

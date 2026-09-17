@@ -46,12 +46,38 @@ func TestMaterializeAuthUsesPinnedIsolatedRoot(t *testing.T) {
 	if !strings.Contains(main, "ibm_container_cluster_config") || !strings.Contains(main, "ibm_container_vpc_cluster") || !strings.Contains(main, "ibm_container_cluster") || !strings.Contains(main, "public_service_endpoint") {
 		t.Fatalf("public auth root does not select the cluster provider and export public config: %s", main)
 	}
-	if strings.Contains(main, "endpoint_type") {
-		t.Fatalf("public auth root must use the provider's default public endpoint: %s", main)
+	if !strings.Contains(main, `endpoint_type     = "private"`) || !strings.Contains(main, "ibm_sm_private_certificate") || !strings.Contains(main, "ibm_is_vpn_server_client_configuration") {
+		t.Fatalf("auth root does not materialize the private VPN bundle: %s", main)
 	}
 	lock := string(mustReadAuth(t, filepath.Join(workspace, ".terraform.lock.hcl")))
 	if !strings.Contains(lock, "version     = \"2.5.0\"") {
 		t.Fatalf("auth root does not pin provider: %s", lock)
+	}
+}
+
+func TestMaterializeAuthRequiresPrivateEndpointURLForVPN(t *testing.T) {
+	workspace := t.TempDir()
+	if err := MaterializeAuth(workspace); err != nil {
+		t.Fatal(err)
+	}
+	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
+	if !strings.Contains(main, `data.ibm_container_vpc_cluster.target[0].private_service_endpoint && trimspace(data.ibm_container_vpc_cluster.target[0].private_service_endpoint_url) != ""`) {
+		t.Fatalf("private VPN eligibility does not require a usable endpoint URL: %s", main)
+	}
+}
+
+func TestMaterializeAuthCleanupUsesPinnedClusterIndependentRoot(t *testing.T) {
+	workspace := t.TempDir()
+	if err := MaterializeAuthCleanup(workspace); err != nil {
+		t.Fatal(err)
+	}
+	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
+	if !strings.Contains(main, `resource "ibm_sm_private_certificate" "allocation"`) || strings.Contains(main, `data "ibm_container`) || strings.Contains(main, "vpn_server_client_configuration") {
+		t.Fatalf("cleanup root is not certificate-only: %s", main)
+	}
+	lock := string(mustReadAuth(t, filepath.Join(workspace, ".terraform.lock.hcl")))
+	if !strings.Contains(lock, "version     = \"2.5.0\"") {
+		t.Fatalf("cleanup root does not pin IBM provider 2.5.0: %s", lock)
 	}
 }
 

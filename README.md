@@ -101,9 +101,9 @@ ict apply allocation-123 \
 
 ICT rejects omitted `--auto-approve`, malformed, unknown, or trailing JSON, changed lifecycle IDs, backend mismatch, changed canonical values, recomputed defaults or names, and credential fields before it initializes Terraform. It reconstructs canonical Terraform files in fresh task-local storage, initializes the exact frozen S3 backend, and runs `terraform apply -input=false -no-color -auto-approve` with the frozen tfvars. This intentionally makes a new Terraform plan; it does not consume or compare the disposable review plan.
 
-### Optional public admin export
+### Optional admin export
 
-A caller can request a best-effort public admin kubeconfig only while applying:
+A caller can request a best-effort endpoint-appropriate admin bundle only while applying:
 
 ```sh
 ict apply allocation-123 \
@@ -115,9 +115,11 @@ ict apply allocation-123 \
   --auto-approve
 ```
 
-Both auth paths are required together. ICT applies infrastructure first, then uses isolated companion state at `<backend-key>.auth` to inspect the actual cluster endpoint and retrieve an admin config only when it is public-accessible and non-Satellite. The private `kubeconfig.yaml` is atomically written with mode `0600`; it embeds its certificate authority and client credentials and rejects exec plugins, tokens, and local credential references. The manifest is bounded non-secret JSON containing only availability and artifact names.
+Both auth paths are required together. ICT applies infrastructure first, then uses isolated companion state at `<backend-key>.auth` to inspect the actual cluster endpoint. The optional frozen private-policy flags belong to `plan`, not `apply`: `--auth-allocation-uid`, `--auth-vpn-server-id`, `--auth-secrets-manager-id`, `--auth-secrets-manager-region`, `--auth-secret-group-id`, `--auth-certificate-template`, `--auth-issuer`, and `--auth-ttl`. They are non-secret and all-or-none; later operations use only the frozen context. The private `kubeconfig.yaml` is atomically written with mode `0600`; it embeds its certificate authority and client credentials and rejects exec plugins, tokens, and local credential references. The manifest is bounded non-secret JSON containing only availability and artifact names.
 
-Private-only clusters and Satellite clusters return a safe `unsupported` manifest and do not export a public kubeconfig. Retrieval, validation, timeout, cancellation, or output failures return `unavailable` without changing the successful infrastructure apply result. ICT does not retry, renew, or recover a failed export. Destroy attempts companion-state cleanup with refresh disabled after infrastructure destroy; that best-effort cleanup never prevents infrastructure cleanup.
+A public endpoint writes exactly `kubeconfig.yaml` and reports `mode: public`. For a private-only VPC, the frozen plan inputs may include an allocation UID plus existing VPN, Secrets Manager, template, issuer, group, region, and TTL policy. ICT then uses the isolated companion state at `<backend-key>.auth` to issue only that allocation certificate with the pinned IBM provider, retrieves the generic VPN profile and private admin config, and writes exactly `kubeconfig.yaml` plus `client.ovpn`. The manifest reports `mode: vpn` and the actual certificate expiry, never credential material. Classic clusters retain their public-only kubeconfig export; only private VPC clusters can receive a VPN bundle. Satellite, missing private VPC metadata, or a missing private policy return safe `unsupported` without acquisition.
+
+The VPN profile must contain inline server trust and cannot request login/password credentials, external certificate files, scripts, plugins, or management hooks. ICT validates a client-auth certificate, PKCS8 key match, actual unexpired expiry, and self-contained kubeconfig before either private artifact is retained. Retrieval, validation, timeout, cancellation, or output failures return `unavailable` without changing the successful infrastructure apply result; partial bundles are removed. ICT does not retry, renew, or recover a failed export. Destroy uses the original frozen policy and companion state with refresh disabled, deletes only the allocation certificate, and treats absent/partial state or a provider 404 as best-effort cleanup that never prevents infrastructure cleanup. Deletion is not certificate revocation.
 
 ### Destroy
 
@@ -130,7 +132,7 @@ ict destroy allocation-123 \
   --result-file /run/ict/destroy-result.json
 ```
 
-ICT reconstructs the validated frozen tfvars in fresh task-local storage, initializes the remote backend, and runs Terraform destroy with `-auto-approve`. It never treats a missing local state file, missing workspace, inaccessible backend, or ambiguous remote state as successful cleanup. Terraform's remote-backend result is the only cleanup success signal, including a successful no-resource destroy.
+ICT reconstructs the validated frozen tfvars in fresh task-local storage, initializes the remote backend, and runs Terraform destroy with `-auto-approve`. It never treats a missing local state file, missing workspace, inaccessible backend, or ambiguous remote state as successful cleanup. Terraform's remote-backend result is the only cleanup success signal, including a successful no-resource destroy. If companion certificate cleanup cannot run, the successful destroy result records only `"auth_cleanup":"failed"` and emits `ict: auth cleanup unavailable`; neither message includes provider details or claims certificate revocation.
 
 ### Result files
 

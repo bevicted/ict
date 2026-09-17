@@ -75,35 +75,54 @@ type Inputs struct {
 	Owner                          string
 	Prefix                         string
 	Name                           string
+	AuthPolicy                     AuthPolicy
+}
+
+// AuthPolicy is the frozen non-secret policy for an allocation-owned VPN bundle.
+type AuthPolicy struct {
+	AllocationUID        string `json:"allocation_uid,omitempty"`
+	VPNServerID          string `json:"vpn_server_id,omitempty"`
+	SecretsManagerID     string `json:"secrets_manager_id,omitempty"`
+	SecretsManagerRegion string `json:"secrets_manager_region,omitempty"`
+	SecretGroupID        string `json:"secret_group_id,omitempty"`
+	CertificateTemplate  string `json:"certificate_template,omitempty"`
+	Issuer               string `json:"issuer,omitempty"`
+	TTL                  string `json:"ttl,omitempty"`
+}
+
+// Enabled reports whether any private-auth input was supplied; validation requires all of them.
+func (p AuthPolicy) Enabled() bool {
+	return p.AllocationUID != "" || p.VPNServerID != "" || p.SecretsManagerID != "" || p.SecretsManagerRegion != "" || p.SecretGroupID != "" || p.CertificateTemplate != "" || p.Issuer != "" || p.TTL != ""
 }
 
 // Values are the normalized values persisted in tfvars and recovery context.
 type Values struct {
-	ClusterName                    string   `json:"cluster_name"`
-	ResourceGroupName              string   `json:"resource_group_name"`
-	Region                         string   `json:"region"`
-	ClusterMode                    string   `json:"cluster_mode"`
-	Platform                       string   `json:"platform"`
-	KubeVersion                    string   `json:"kube_version"`
-	WorkerCount                    int      `json:"worker_count"`
-	Zone                           string   `json:"zone,omitempty"`
-	Flavor                         string   `json:"flavor,omitempty"`
-	VPCID                          string   `json:"vpc_id,omitempty"`
-	SubnetIDs                      []string `json:"subnet_ids,omitempty"`
-	PublicGatewayIDs               []string `json:"public_gateway_ids,omitempty"`
-	Datacenter                     string   `json:"datacenter,omitempty"`
-	MachineType                    string   `json:"machine_type,omitempty"`
-	PublicVLANID                   string   `json:"public_vlan_id,omitempty"`
-	PrivateVLANID                  string   `json:"private_vlan_id,omitempty"`
-	SatelliteZones                 []string `json:"satellite_zones,omitempty"`
-	SatelliteManagedFrom           string   `json:"satellite_managed_from,omitempty"`
-	SatelliteLocationID            string   `json:"satellite_location_id,omitempty"`
-	SatelliteHostImage             string   `json:"satellite_host_image,omitempty"`
-	SatelliteHostProfile           string   `json:"satellite_host_profile,omitempty"`
-	SatelliteSSHPublicKey          string   `json:"satellite_ssh_public_key,omitempty"`
-	SatelliteSSHKeyID              string   `json:"satellite_ssh_key_id,omitempty"`
-	SatelliteWorkerInstanceIDs     []string `json:"satellite_worker_instance_ids,omitempty"`
-	SatelliteWorkerOperatingSystem string   `json:"satellite_worker_operating_system,omitempty"`
+	ClusterName                    string      `json:"cluster_name"`
+	ResourceGroupName              string      `json:"resource_group_name"`
+	Region                         string      `json:"region"`
+	ClusterMode                    string      `json:"cluster_mode"`
+	Platform                       string      `json:"platform"`
+	KubeVersion                    string      `json:"kube_version"`
+	WorkerCount                    int         `json:"worker_count"`
+	Zone                           string      `json:"zone,omitempty"`
+	Flavor                         string      `json:"flavor,omitempty"`
+	VPCID                          string      `json:"vpc_id,omitempty"`
+	SubnetIDs                      []string    `json:"subnet_ids,omitempty"`
+	PublicGatewayIDs               []string    `json:"public_gateway_ids,omitempty"`
+	Datacenter                     string      `json:"datacenter,omitempty"`
+	MachineType                    string      `json:"machine_type,omitempty"`
+	PublicVLANID                   string      `json:"public_vlan_id,omitempty"`
+	PrivateVLANID                  string      `json:"private_vlan_id,omitempty"`
+	SatelliteZones                 []string    `json:"satellite_zones,omitempty"`
+	SatelliteManagedFrom           string      `json:"satellite_managed_from,omitempty"`
+	SatelliteLocationID            string      `json:"satellite_location_id,omitempty"`
+	SatelliteHostImage             string      `json:"satellite_host_image,omitempty"`
+	SatelliteHostProfile           string      `json:"satellite_host_profile,omitempty"`
+	SatelliteSSHPublicKey          string      `json:"satellite_ssh_public_key,omitempty"`
+	SatelliteSSHKeyID              string      `json:"satellite_ssh_key_id,omitempty"`
+	SatelliteWorkerInstanceIDs     []string    `json:"satellite_worker_instance_ids,omitempty"`
+	SatelliteWorkerOperatingSystem string      `json:"satellite_worker_operating_system,omitempty"`
+	AuthPolicy                     *AuthPolicy `json:"auth_policy,omitempty"`
 }
 
 // RecoveryContext holds exactly the non-secret data needed to safely destroy the active state.
@@ -128,9 +147,10 @@ type PlanResult struct {
 
 // OperationResult is the bounded local handoff for a completed apply or destroy.
 type OperationResult struct {
-	Version   int    `json:"version"`
-	Operation string `json:"operation"`
-	Workspace string `json:"workspace,omitempty"`
+	Version     int    `json:"version"`
+	Operation   string `json:"operation"`
+	Workspace   string `json:"workspace,omitempty"`
+	AuthCleanup string `json:"auth_cleanup,omitempty"`
 }
 
 // CommandRunner is the injectable Terraform subprocess seam.
@@ -310,7 +330,7 @@ func (r Runner) Plan(ctx context.Context, stateID string, supplied Inputs, backe
 	if err != nil {
 		return err
 	}
-	tfvarsData, err := marshalJSON(values)
+	tfvarsData, err := infrastructureTFVars(values)
 	if err != nil {
 		return err
 	}
@@ -374,7 +394,7 @@ func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend 
 	if err := r.runOperation(infrastructureCtx, "apply", result, resultPath); err != nil {
 		return err
 	}
-	r.exportPublicAuth(ctx, result, authExport)
+	r.exportAuth(ctx, result, authExport)
 	return nil
 }
 
@@ -387,7 +407,13 @@ func (r Runner) Destroy(ctx context.Context, stateID, contextPath string, backen
 	if err := r.runOperation(ctx, "destroy", result, resultPath); err != nil {
 		return err
 	}
-	r.cleanupAuth(ctx, result)
+	if !r.cleanupAuth(ctx, result) {
+		if err := recordAuthCleanupFailure(resultPath); err != nil {
+			fmt.Fprintln(r.stderr(), "ict: auth cleanup unavailable")
+			return nil
+		}
+		fmt.Fprintln(r.stderr(), "ict: auth cleanup unavailable")
+	}
 	return nil
 }
 
@@ -423,7 +449,7 @@ func (r Runner) runReview(ctx context.Context, result PlanResult, resultPath str
 	if err != nil {
 		return err
 	}
-	tfvarsData, err := marshalJSON(result.Values)
+	tfvarsData, err := infrastructureTFVars(result.Values)
 	if err != nil {
 		return err
 	}
@@ -466,7 +492,7 @@ func (r Runner) runOperation(ctx context.Context, operation string, result PlanR
 	if err != nil {
 		return err
 	}
-	tfvarsData, err := marshalJSON(result.Values)
+	tfvarsData, err := infrastructureTFVars(result.Values)
 	if err != nil {
 		return err
 	}
@@ -501,7 +527,26 @@ func (r Runner) runOperation(ctx context.Context, operation string, result PlanR
 }
 
 func writeOperationResult(path, operation, workspace string) error {
-	result := OperationResult{Version: 1, Operation: operation, Workspace: workspace}
+	return writeBoundedOperationResult(path, OperationResult{Version: 1, Operation: operation, Workspace: workspace})
+}
+
+func recordAuthCleanupFailure(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read destroy result: %w", err)
+	}
+	var result OperationResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("decode destroy result: %w", err)
+	}
+	if result.Version != 1 || result.Operation != "destroy" {
+		return errors.New("invalid destroy result")
+	}
+	result.AuthCleanup = "failed"
+	return writeBoundedOperationResult(path, result)
+}
+
+func writeBoundedOperationResult(path string, result OperationResult) error {
 	data, err := marshalJSON(result)
 	if err != nil {
 		return err
@@ -607,7 +652,15 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
-		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs)}, target, nil
+		if err := validateAuthPolicy(supplied.AuthPolicy); err != nil {
+			return Values{}, config.ResolvedTarget{}, err
+		}
+		var authPolicy *AuthPolicy
+		if supplied.AuthPolicy.Enabled() {
+			policy := supplied.AuthPolicy
+			authPolicy = &policy
+		}
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), AuthPolicy: authPolicy}, target, nil
 	case config.ProviderClassic:
 		if !datacenterPattern.MatchString(supplied.Datacenter) {
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid datacenter %q", supplied.Datacenter)
@@ -1445,6 +1498,19 @@ func writeJSON(path string, value any) error {
 	return nil
 }
 
+func infrastructureTFVars(values Values) ([]byte, error) {
+	data, err := marshalJSON(values)
+	if err != nil {
+		return nil, err
+	}
+	var variables map[string]json.RawMessage
+	if err := json.Unmarshal(data, &variables); err != nil {
+		return nil, err
+	}
+	delete(variables, "auth_policy")
+	return marshalJSON(variables)
+}
+
 func tfvarsSHA256(data []byte) string {
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
@@ -1473,6 +1539,11 @@ func validateRecoveryForDestroy(recovery RecoveryContext) error {
 }
 
 func validateRecoveryValues(values Values, fingerprint string) (config.Provider, error) {
+	if values.AuthPolicy != nil {
+		if err := validateAuthPolicy(*values.AuthPolicy); err != nil {
+			return "", err
+		}
+	}
 	if strings.TrimSpace(values.ResourceGroupName) == "" || values.WorkerCount < 1 || (values.Platform != "kubernetes" && values.Platform != "openshift") {
 		return "", errors.New("invalid recovery values")
 	}
@@ -1506,14 +1577,35 @@ func validateRecoveryValues(values Values, fingerprint string) (config.Provider,
 	}
 }
 
+func validateAuthPolicy(policy AuthPolicy) error {
+	if !policy.Enabled() {
+		return nil
+	}
+	for _, value := range []struct {
+		name  string
+		value string
+		limit int
+	}{
+		{"allocation UID", policy.AllocationUID, 128}, {"VPN server ID", policy.VPNServerID, 256}, {"Secrets Manager ID", policy.SecretsManagerID, 256}, {"Secrets Manager region", policy.SecretsManagerRegion, 64}, {"secret group ID", policy.SecretGroupID, 256}, {"certificate template", policy.CertificateTemplate, 256}, {"issuer", policy.Issuer, 256}, {"TTL", policy.TTL, 32},
+	} {
+		if value.value == "" || len(value.value) > value.limit || strings.TrimSpace(value.value) != value.value || strings.ContainsFunc(value.value, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return fmt.Errorf("invalid auth policy %s", value.name)
+		}
+	}
+	if _, err := time.ParseDuration(policy.TTL); err != nil {
+		return errors.New("invalid auth policy TTL")
+	}
+	return nil
+}
+
 func emptyValues(values Values, provider string) bool {
 	switch provider {
 	case "vpc":
 		return values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == "" && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
 	case "classic":
-		return values.Zone == "" && values.Flavor == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
+		return values.AuthPolicy == nil && values.Zone == "" && values.Flavor == "" && values.VPCID == "" && len(values.SubnetIDs) == 0 && len(values.PublicGatewayIDs) == 0 && len(values.SatelliteZones) == 0 && values.SatelliteManagedFrom == "" && values.SatelliteLocationID == "" && values.SatelliteHostImage == "" && values.SatelliteHostProfile == "" && values.SatelliteSSHPublicKey == "" && values.SatelliteSSHKeyID == "" && len(values.SatelliteWorkerInstanceIDs) == 0 && values.SatelliteWorkerOperatingSystem == ""
 	case "satellite":
-		return values.Zone == "" && values.Flavor == "" && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
+		return values.AuthPolicy == nil && values.Zone == "" && values.Flavor == "" && values.Datacenter == "" && values.MachineType == "" && values.PublicVLANID == "" && values.PrivateVLANID == ""
 	default:
 		return false
 	}
