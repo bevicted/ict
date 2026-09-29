@@ -48,6 +48,23 @@ variable "kube_version" {
   type        = string
 }
 
+variable "private_only" {
+  description = "Disable the VPC cluster public service endpoint."
+  type        = bool
+  default     = false
+}
+
+variable "auth_vpn_server_id" {
+  description = "Frozen existing VPN server ID used only for private VPC API ingress."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.auth_vpn_server_id == "" || trimspace(var.auth_vpn_server_id) == var.auth_vpn_server_id
+    error_message = "auth_vpn_server_id must not have leading or trailing whitespace."
+  }
+}
+
 variable "worker_count" {
   description = "Worker count, with a minimum of one for Kubernetes and two for OpenShift outside Satellite."
   type        = number

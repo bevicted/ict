@@ -13,11 +13,13 @@ import (
 
 // CLI is the root command grammar.
 type CLI struct {
-	Plan    PlanCommand    `cmd:"" help:"Resolve inputs and create a disposable remote-backend Terraform plan."`
-	Review  ReviewCommand  `cmd:"" help:"Create a fresh disposable plan from frozen planning metadata."`
-	Apply   ApplyCommand   `cmd:"" help:"Apply frozen planning metadata with a fresh Terraform plan and --auto-approve."`
-	Destroy DestroyCommand `cmd:"" help:"Destroy remote Terraform state from frozen planning metadata."`
-	Config  ConfigCommand  `cmd:"" help:"Inspect effective configuration."`
+	Plan        PlanCommand        `cmd:"" help:"Resolve inputs and create a disposable remote-backend Terraform plan."`
+	Review      ReviewCommand      `cmd:"" help:"Create a fresh disposable plan from frozen planning metadata."`
+	Apply       ApplyCommand       `cmd:"" help:"Apply frozen planning metadata with a fresh Terraform plan and --auto-approve."`
+	Destroy     DestroyCommand     `cmd:"" help:"Destroy remote Terraform state from frozen planning metadata."`
+	Auth        AuthCommand        `cmd:"" help:"Acquire auth assets against frozen cluster metadata only."`
+	AuthCleanup AuthCleanupCommand `cmd:"" name:"auth-cleanup" help:"Delete only allocation-owned VPN certificates without Terraform state."`
+	Config      ConfigCommand      `cmd:"" help:"Inspect effective configuration."`
 }
 
 // VPCCommand contains transient planning inputs.
@@ -29,6 +31,7 @@ type VPCCommand struct {
 	Platform                       string   `help:"Cluster platform (kubernetes or openshift)." env:"ICT_PLATFORM"`
 	Version                        string   `help:"Kubernetes or OpenShift version." env:"ICT_VERSION"`
 	ResourceGroup                  string   `help:"Existing resource group name." env:"ICT_RESOURCE_GROUP"`
+	PrivateOnly                    bool     `name:"private-only" help:"Create a VPC cluster without a public service endpoint." env:"ICT_PRIVATE_ONLY"`
 	Zone                           string   `help:"VPC zone." env:"ICT_ZONE"`
 	Flavor                         string   `help:"VPC worker flavor." env:"ICT_FLAVOR"`
 	AccountID                      string   `name:"account-id" help:"Frozen account identity for an existing VPC binding." env:"ICT_ACCOUNT_ID"`
@@ -53,7 +56,6 @@ type VPCCommand struct {
 	Owner                          string   `help:"Owner used when generating a name." env:"ICT_OWNER"`
 	Prefix                         string   `help:"Prefix used when generating a name." env:"ICT_PREFIX"`
 	Name                           string   `help:"Explicit cluster name." env:"ICT_NAME"`
-	AuthAllocationUID              string   `name:"auth-allocation-uid" help:"Frozen allocation identity for optional VPC VPN authentication." env:"ICT_AUTH_ALLOCATION_UID"`
 	AuthVPNServerID                string   `name:"auth-vpn-server-id" help:"Frozen existing VPN server ID." env:"ICT_AUTH_VPN_SERVER_ID"`
 	AuthSecretsManagerID           string   `name:"auth-secrets-manager-id" help:"Frozen existing Secrets Manager instance ID." env:"ICT_AUTH_SECRETS_MANAGER_ID"`
 	AuthSecretsManagerRegion       string   `name:"auth-secrets-manager-region" help:"Frozen Secrets Manager region." env:"ICT_AUTH_SECRETS_MANAGER_REGION"`
@@ -95,6 +97,30 @@ type DestroyCommand struct {
 	ContextFile   string `name:"context-file" required:"" help:"Absolute path to strict frozen planning metadata JSON."`
 	BackendConfig string `name:"backend-config" required:"" help:"Absolute path to strict non-secret S3 backend JSON configuration."`
 	ResultFile    string `name:"result-file" required:"" help:"Absolute path for the bounded destroy result JSON."`
+}
+
+// AuthCommand deliberately has no backend input. Its Terraform state exists only
+// below the caller-provided tmpfs directory and is removed before it returns.
+type AuthCommand struct {
+	StateID           string `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
+	ContextFile       string `name:"context-file" required:"" help:"Absolute path to strict backend-free auth metadata JSON."`
+	ResultFile        string `name:"result-file" required:"" help:"Absolute path for the bounded auth result JSON."`
+	AuthManifestFile  string `name:"auth-manifest-file" required:"" help:"Absolute path for the bounded non-secret auth manifest JSON."`
+	AuthOutputDir     string `name:"auth-output-dir" required:"" help:"Absolute private directory for exported auth files."`
+	AuthTmpfsDir      string `name:"auth-tmpfs-dir" required:"" help:"Absolute caller-mounted tmpfs directory for disposable auth Terraform state."`
+	AuthAllocationUID string `name:"auth-allocation-uid" required:"" help:"Runtime allocation UID for certificate ownership."`
+	AuthAttemptID     string `name:"auth-attempt-id" required:"" help:"Runtime auth attempt ID for certificate ownership."`
+}
+
+// AuthCleanupCommand removes only certificates whose current metadata matches
+// the persisted allocation ownership references.
+type AuthCleanupCommand struct {
+	StateID                  string   `arg:"" name:"state-id" help:"Lifecycle operation identifier."`
+	ContextFile              string   `name:"context-file" required:"" help:"Absolute path to strict backend-free auth metadata JSON."`
+	ResultFile               string   `name:"result-file" required:"" help:"Absolute path for the bounded cleanup result JSON."`
+	CertificateIDs           []string `name:"certificate-id" help:"Optional issued certificate ID to verify before deletion; repeat for every persisted reference."`
+	CertificateAllocationUID string   `name:"certificate-allocation-uid" help:"Expected allocation UID for an explicit issued certificate."`
+	CertificateAttemptID     string   `name:"certificate-attempt-id" help:"Expected auth attempt ID for an explicit issued certificate."`
 }
 
 // ConfigCommand contains configuration inspection and mutation commands.
@@ -191,6 +217,16 @@ func (r Runner) Run(ctx context.Context, parsed *kong.Context, command *CLI) err
 			return err
 		}
 		return r.Workflow.Destroy(ctx, command.Destroy.StateID, command.Destroy.ContextFile, backend, command.Destroy.ResultFile)
+	case "auth <state-id>":
+		if err := validateStateID(command.Auth.StateID); err != nil {
+			return err
+		}
+		return r.Workflow.AuthWithAttempt(ctx, command.Auth.StateID, command.Auth.ContextFile, command.Auth.ResultFile, command.Auth.AuthTmpfsDir, workflow.AuthAttempt{AllocationUID: command.Auth.AuthAllocationUID, AttemptID: command.Auth.AuthAttemptID}, workflow.AuthExport{ManifestPath: command.Auth.AuthManifestFile, OutputDir: command.Auth.AuthOutputDir})
+	case "auth-cleanup <state-id>":
+		if err := validateStateID(command.AuthCleanup.StateID); err != nil {
+			return err
+		}
+		return r.Workflow.AuthCleanup(ctx, command.AuthCleanup.StateID, command.AuthCleanup.ContextFile, command.AuthCleanup.ResultFile, command.AuthCleanup.CertificateIDs, command.AuthCleanup.CertificateAllocationUID, command.AuthCleanup.CertificateAttemptID)
 	case "config show":
 		return r.Config.Show(command.Config.Show.Config)
 	case "config get <path>":
@@ -212,5 +248,5 @@ func validateStateID(stateID string) error {
 }
 
 func (c VPCCommand) inputs() workflow.Inputs {
-	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Prefix: c.Prefix, Name: c.Name, AccountID: c.AccountID, VPCRegion: c.VPCRegion, AuthPolicy: workflow.AuthPolicy{AllocationUID: c.AuthAllocationUID, VPNServerID: c.AuthVPNServerID, SecretsManagerID: c.AuthSecretsManagerID, SecretsManagerRegion: c.AuthSecretsManagerRegion, SecretGroupID: c.AuthSecretGroupID, CertificateTemplate: c.AuthCertificateTemplate, Issuer: c.AuthIssuer, TTL: c.AuthTTL}}
+	return workflow.Inputs{ConfigPath: c.Config, Target: c.Target, Provider: c.Provider, Platform: c.Platform, Version: c.Version, ResourceGroup: c.ResourceGroup, PrivateOnly: c.PrivateOnly, Zone: c.Zone, Flavor: c.Flavor, VPCID: c.VPCID, SubnetIDs: c.SubnetIDs, PublicGatewayIDs: c.PublicGatewayIDs, Datacenter: c.Datacenter, MachineType: c.MachineType, PublicVLANID: c.PublicVLANID, PrivateVLANID: c.PrivateVLANID, SatelliteZones: c.SatelliteZones, SatelliteManagedFrom: c.SatelliteManagedFrom, SatelliteLocationID: c.SatelliteLocationID, SatelliteHostImage: c.SatelliteHostImage, SatelliteHostProfile: c.SatelliteHostProfile, SatelliteSSHPublicKeyPath: c.SatelliteSSHPublicKeyPath, SatelliteSSHKeyID: c.SatelliteSSHKeyID, SatelliteWorkerInstanceIDs: c.SatelliteWorkerInstanceIDs, SatelliteWorkerOperatingSystem: c.SatelliteWorkerOperatingSystem, WorkerCount: c.WorkerCount, Owner: c.Owner, Prefix: c.Prefix, Name: c.Name, AccountID: c.AccountID, VPCRegion: c.VPCRegion, AuthPolicy: workflow.AuthPolicy{VPNServerID: c.AuthVPNServerID, SecretsManagerID: c.AuthSecretsManagerID, SecretsManagerRegion: c.AuthSecretsManagerRegion, SecretGroupID: c.AuthSecretGroupID, CertificateTemplate: c.AuthCertificateTemplate, Issuer: c.AuthIssuer, TTL: c.AuthTTL}}
 }

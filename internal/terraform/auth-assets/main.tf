@@ -38,7 +38,8 @@ locals {
   cluster_id       = var.cluster_mode == "vpc" ? data.ibm_container_vpc_cluster.target[0].id : data.ibm_container_cluster.target[0].id
   public_available = var.cluster_mode == "vpc" ? data.ibm_container_vpc_cluster.target[0].public_service_endpoint : data.ibm_container_cluster.target[0].public_service_endpoint
   public_endpoint  = var.cluster_mode == "vpc" ? data.ibm_container_vpc_cluster.target[0].public_service_endpoint_url : data.ibm_container_cluster.target[0].public_service_endpoint_url
-  private_eligible = var.cluster_mode == "vpc" && !local.public_available && data.ibm_container_vpc_cluster.target[0].private_service_endpoint && trimspace(data.ibm_container_vpc_cluster.target[0].private_service_endpoint_url) != "" && var.auth_allocation_uid != "" && var.auth_vpn_server_id != "" && var.auth_secrets_manager_id != "" && var.auth_secrets_manager_region != "" && var.auth_secret_group_id != "" && var.auth_certificate_template != "" && var.auth_issuer != "" && var.auth_ttl != ""
+  private_eligible = var.cluster_mode == "vpc" && !local.public_available && data.ibm_container_vpc_cluster.target[0].private_service_endpoint && trimspace(data.ibm_container_vpc_cluster.target[0].private_service_endpoint_url) != "" && var.auth_allocation_uid != "" && var.auth_attempt_id != "" && var.auth_vpn_server_id != "" && var.auth_secrets_manager_id != "" && var.auth_secrets_manager_region != "" && var.auth_secret_group_id != "" && var.auth_certificate_template != "" && var.auth_issuer != "" && var.auth_ttl != ""
+  certificate_name = "ict-${substr(sha256("${var.auth_allocation_uid}:${var.auth_attempt_id}"), 0, 32)}-vpn"
   auth_mode        = local.public_available ? "public" : (local.private_eligible ? "vpn" : "unsupported")
 }
 
@@ -106,11 +107,15 @@ resource "ibm_sm_private_certificate" "allocation" {
   endpoint_type        = "public"
   secret_group_id      = var.auth_secret_group_id
   certificate_template = var.auth_certificate_template
-  name                 = "ict-${var.auth_allocation_uid}-vpn"
-  common_name          = "ict-${var.auth_allocation_uid}-vpn"
-  ttl                  = var.auth_ttl
-  format               = "pem"
-  private_key_format   = "pkcs8"
+  name                 = local.certificate_name
+  common_name          = local.certificate_name
+  custom_metadata = {
+    ict_allocation_uid  = var.auth_allocation_uid
+    ict_auth_attempt_id = var.auth_attempt_id
+  }
+  ttl                = var.auth_ttl
+  format             = "pem"
+  private_key_format = "pkcs8"
 
   rotation { auto_rotate = false }
 }
@@ -139,6 +144,18 @@ output "vpn_profile" {
   sensitive = true
 }
 
+output "vpn_certificate_id" {
+  value = try(ibm_sm_private_certificate.allocation[0].secret_id, "")
+}
+
+output "vpn_certificate_allocation_uid" {
+  value = var.auth_allocation_uid
+}
+
+output "vpn_certificate_attempt_id" {
+  value = var.auth_attempt_id
+}
+
 output "vpn_certificate" {
   value     = try(ibm_sm_private_certificate.allocation[0].certificate, "")
   sensitive = true
@@ -150,7 +167,7 @@ output "vpn_private_key" {
 }
 
 output "vpn_ca_chain" {
-  value     = try(ibm_sm_private_certificate.allocation[0].ca_chain, "")
+  value     = join("\n", try(ibm_sm_private_certificate.allocation[0].ca_chain, []))
   sensitive = true
 }
 
@@ -158,6 +175,6 @@ output "vpn_expiry" {
   value = try(ibm_sm_private_certificate.allocation[0].expiration_date, "")
 }
 
-output "vpn_issuer" {
-  value = try(ibm_sm_private_certificate.allocation[0].issuer, "")
+output "vpn_certificate_authority" {
+  value = try(ibm_sm_private_certificate.allocation[0].certificate_authority, "")
 }

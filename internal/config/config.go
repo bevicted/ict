@@ -46,14 +46,14 @@ type Target struct {
 
 // Endpoints holds the service endpoints used by IBM Cloud CLI and Terraform.
 type Endpoints struct {
-	IAM                string `yaml:"iam"`
-	ContainerService   string `yaml:"container_service"`
-	GlobalTagging      string `yaml:"global_tagging"`
-	ResourceManagement string `yaml:"resource_management"`
-	ResourceController string `yaml:"resource_controller"`
-	VPC                string `yaml:"vpc"`
-	Satellite          string `yaml:"satellite"`
-	SatelliteConfig    string `yaml:"satellite_config"`
+	IAM                string `json:",omitempty" yaml:"iam"`
+	ContainerService   string `json:",omitempty" yaml:"container_service"`
+	GlobalTagging      string `json:",omitempty" yaml:"global_tagging"`
+	ResourceManagement string `json:",omitempty" yaml:"resource_management"`
+	ResourceController string `json:",omitempty" yaml:"resource_controller"`
+	VPC                string `json:",omitempty" yaml:"vpc"`
+	Satellite          string `json:",omitempty" yaml:"satellite"`
+	SatelliteConfig    string `json:",omitempty" yaml:"satellite_config"`
 }
 
 // ResolvedTarget is a target after endpoint environment overrides are applied.

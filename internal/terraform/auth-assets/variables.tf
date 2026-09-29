@@ -27,6 +27,10 @@ variable "auth_allocation_uid" {
   type    = string
   default = ""
 }
+variable "auth_attempt_id" {
+  type    = string
+  default = ""
+}
 variable "auth_vpn_server_id" {
   type    = string
   default = ""

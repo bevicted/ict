@@ -30,10 +30,40 @@ func TestMaterializeOmitsRepositoryTestFiles(t *testing.T) {
 			t.Fatalf("missing production file %s: %v", name, err)
 		}
 	}
-	for _, name := range []string{"cluster-name.tftest.hcl", "satellite-topology.tftest.hcl", "vpc-reuse.tftest.hcl"} {
+	for _, name := range []string{"cluster-name.tftest.hcl", "satellite-topology.tftest.hcl", "vpc-reuse.tftest.hcl", "private-vpe-ingress.tftest.hcl"} {
 		if _, err := os.Stat(filepath.Join(workspace, name)); !os.IsNotExist(err) {
 			t.Fatalf("materialized test file %s: %v", name, err)
 		}
+	}
+}
+
+func TestMaterializePrivateVPNIngressOwnsOnlyTheRule(t *testing.T) {
+	workspace := t.TempDir()
+	if err := Materialize(workspace); err != nil {
+		t.Fatal(err)
+	}
+	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
+	for _, required := range []string{
+		`data "ibm_is_vpn_server" "private_api"`,
+		`data "ibm_is_security_group" "private_api"`,
+		`name       = "kube-vpegw-${ibm_container_vpc_cluster.cluster[0].id}"`,
+		"vpc        = local.effective_vpc_id",
+		"vpe_service_endpoint_url",
+		`resource "ibm_is_security_group_rule" "private_api_vpn_ingress"`,
+		"depends_on = [ibm_container_vpc_cluster.cluster]",
+		"group     = data.ibm_is_security_group.private_api[0].id",
+		`protocol  = "tcp"`,
+		"remote    = data.ibm_is_vpn_server.private_api[0].client_ip_pool",
+	} {
+		if !strings.Contains(main, required) {
+			t.Fatalf("private VPN ingress is missing %q", required)
+		}
+	}
+	if strings.Contains(main, `data "ibm_is_virtual_endpoint_gateway"`) {
+		t.Fatalf("infrastructure root must not discover API VPEs: %s", main)
+	}
+	if strings.Contains(main, `output "`) {
+		t.Fatalf("infrastructure root must not expose private VPN ingress values: %s", main)
 	}
 }
 
@@ -63,21 +93,6 @@ func TestMaterializeAuthRequiresPrivateEndpointURLForVPN(t *testing.T) {
 	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
 	if !strings.Contains(main, `data.ibm_container_vpc_cluster.target[0].private_service_endpoint && trimspace(data.ibm_container_vpc_cluster.target[0].private_service_endpoint_url) != ""`) {
 		t.Fatalf("private VPN eligibility does not require a usable endpoint URL: %s", main)
-	}
-}
-
-func TestMaterializeAuthCleanupUsesPinnedClusterIndependentRoot(t *testing.T) {
-	workspace := t.TempDir()
-	if err := MaterializeAuthCleanup(workspace); err != nil {
-		t.Fatal(err)
-	}
-	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
-	if !strings.Contains(main, `resource "ibm_sm_private_certificate" "allocation"`) || strings.Contains(main, `data "ibm_container`) || strings.Contains(main, "vpn_server_client_configuration") {
-		t.Fatalf("cleanup root is not certificate-only: %s", main)
-	}
-	lock := string(mustReadAuth(t, filepath.Join(workspace, ".terraform.lock.hcl")))
-	if !strings.Contains(lock, "version     = \"2.5.0\"") {
-		t.Fatalf("cleanup root does not pin IBM provider 2.5.0: %s", lock)
 	}
 }
 

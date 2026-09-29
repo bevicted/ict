@@ -53,6 +53,7 @@ type Inputs struct {
 	Platform                       string
 	Version                        string
 	ResourceGroup                  string
+	PrivateOnly                    bool
 	Zone                           string
 	Flavor                         string
 	AccountID                      string
@@ -82,7 +83,6 @@ type Inputs struct {
 
 // AuthPolicy is the frozen non-secret policy for an allocation-owned VPN bundle.
 type AuthPolicy struct {
-	AllocationUID        string `json:"allocation_uid,omitempty"`
 	VPNServerID          string `json:"vpn_server_id,omitempty"`
 	SecretsManagerID     string `json:"secrets_manager_id,omitempty"`
 	SecretsManagerRegion string `json:"secrets_manager_region,omitempty"`
@@ -92,9 +92,16 @@ type AuthPolicy struct {
 	TTL                  string `json:"ttl,omitempty"`
 }
 
+// AuthAttempt is the runtime ownership identity for one auth generation. It is
+// passed only to auth and cleanup operations, never persisted in AuthPolicy.
+type AuthAttempt struct {
+	AllocationUID string
+	AttemptID     string
+}
+
 // Enabled reports whether any private-auth input was supplied; validation requires all of them.
 func (p AuthPolicy) Enabled() bool {
-	return p.AllocationUID != "" || p.VPNServerID != "" || p.SecretsManagerID != "" || p.SecretsManagerRegion != "" || p.SecretGroupID != "" || p.CertificateTemplate != "" || p.Issuer != "" || p.TTL != ""
+	return p.VPNServerID != "" || p.SecretsManagerID != "" || p.SecretsManagerRegion != "" || p.SecretGroupID != "" || p.CertificateTemplate != "" || p.Issuer != "" || p.TTL != ""
 }
 
 // Values are the normalized values persisted in tfvars and recovery context.
@@ -106,6 +113,7 @@ type Values struct {
 	Platform                       string      `json:"platform"`
 	KubeVersion                    string      `json:"kube_version"`
 	WorkerCount                    int         `json:"worker_count"`
+	PrivateOnly                    bool        `json:"private_only,omitempty"`
 	Zone                           string      `json:"zone,omitempty"`
 	Flavor                         string      `json:"flavor,omitempty"`
 	AccountID                      string      `json:"account_id,omitempty"`
@@ -149,12 +157,36 @@ type PlanResult struct {
 	PlanPath string                     `json:"plan_path"`
 }
 
+// AuthRecoveryContext contains the frozen values and endpoints used exclusively
+// by auth and auth-cleanup. It intentionally excludes target, backend, and
+// Terraform workspace metadata.
+type AuthRecoveryContext struct {
+	Endpoints                        config.Endpoints `json:"endpoints"`
+	Values                           Values           `json:"values"`
+	SatelliteSSHPublicKeyFingerprint string           `json:"satellite_ssh_public_key_fingerprint"`
+	TFVarsSHA256                     string           `json:"tfvars_sha256"`
+}
+
+// AuthContext is the strict, versioned auth-only handoff. It cannot grant
+// access to the infrastructure backend or its disposable plan.
+type AuthContext struct {
+	Version  int                 `json:"version"`
+	StateID  string              `json:"state_id"`
+	Values   Values              `json:"values"`
+	Recovery AuthRecoveryContext `json:"recovery"`
+}
+
 // OperationResult is the bounded local handoff for a completed apply or destroy.
 type OperationResult struct {
-	Version     int    `json:"version"`
-	Operation   string `json:"operation"`
-	Workspace   string `json:"workspace,omitempty"`
-	AuthCleanup string `json:"auth_cleanup,omitempty"`
+	Version        int                       `json:"version"`
+	Operation      string                    `json:"operation"`
+	Workspace      string                    `json:"workspace,omitempty"`
+	AuthCleanup    string                    `json:"auth_cleanup,omitempty"`
+	Reason         string                    `json:"reason,omitempty"`
+	CleanupOutcome string                    `json:"cleanup_outcome,omitempty"`
+	CleanupReason  string                    `json:"cleanup_reason,omitempty"`
+	CleanupStage   cleanupStage              `json:"cleanup_stage,omitempty"`
+	Certificate    *AuthCertificateReference `json:"certificate,omitempty"`
 }
 
 // CommandRunner is the injectable Terraform subprocess seam.
@@ -217,8 +249,13 @@ type Runner struct {
 	Suffix                func() string
 	Materialize           func(workspace string) error
 	MaterializeAuth       func(workspace string) error
+	Certificates          CertificateStore
+	AuthManifestWriter    func(string, AuthManifest) error
 	AuthTimeout           time.Duration
 	InfrastructureTimeout time.Duration
+	// AuthTmpfsVerifier verifies the caller-owned bounded tmpfs mount. Tests
+	// inject a portable verifier; production uses the platform verifier.
+	AuthTmpfsVerifier AuthTmpfsVerifier
 }
 
 func (r Runner) baseEnvironment() []string {
@@ -385,21 +422,49 @@ func (r Runner) Review(ctx context.Context, stateID, contextPath string, backend
 }
 
 // Apply reconstructs frozen inputs in fresh storage and performs a fresh auto-approved apply.
-func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string, authExport AuthExport) error {
-	if err := validateAuthExport(authExport); err != nil {
-		return err
-	}
+// Authentication is intentionally a separate operation so an auth failure never
+// replays, reads, or alters the main Terraform state.
+func (r Runner) Apply(ctx context.Context, stateID, contextPath string, backend ictterraform.BackendConfig, resultPath string, _ AuthExport) error {
 	result, err := r.loadOperationContext(stateID, contextPath, backend, resultPath)
 	if err != nil {
 		return err
 	}
 	infrastructureCtx, cancel := context.WithTimeout(ctx, r.infrastructureTimeout())
 	defer cancel()
-	if err := r.runOperation(infrastructureCtx, "apply", result, resultPath); err != nil {
+	return r.runOperation(infrastructureCtx, "apply", result, resultPath)
+}
+
+// Auth retains the pre-attempt API for callers that have no explicit runtime
+// identity. New operation paths must use AuthWithAttempt.
+func (r Runner) Auth(ctx context.Context, stateID, contextPath, resultPath, tmpfsDir string, export AuthExport) error {
+	return r.AuthWithAttempt(ctx, stateID, contextPath, resultPath, tmpfsDir, AuthAttempt{AllocationUID: stateID, AttemptID: stateID}, export)
+}
+
+// AuthWithAttempt acquires optional credentials against only the frozen cluster
+// identity. It never initializes or reads the infrastructure backend. Auth
+// acquisition errors are recorded in the value-free manifest; an invoker can
+// keep the Ready cluster.
+func (r Runner) AuthWithAttempt(ctx context.Context, stateID, contextPath, resultPath, tmpfsDir string, attempt AuthAttempt, export AuthExport) error {
+	if err := validateAuthExport(export); err != nil {
 		return err
 	}
-	r.exportAuth(ctx, result, authExport)
-	return nil
+	if _, err := r.validateAuthTmpfs(tmpfsDir); err != nil {
+		return err
+	}
+	result, err := ReadAuthContext(contextPath)
+	if err != nil {
+		return err
+	}
+	if result.StateID != stateID {
+		return errors.New("frozen auth context does not match lifecycle operation identifier")
+	}
+	if err := validateAuthAttempt(attempt); err != nil {
+		return err
+	}
+	if err := r.exportAuth(ctx, result, export, tmpfsDir, attempt); err != nil {
+		return err
+	}
+	return writeOperationResult(resultPath, "auth", "")
 }
 
 // Destroy reconstructs frozen inputs in fresh storage and always asks the remote backend to destroy.
@@ -408,17 +473,51 @@ func (r Runner) Destroy(ctx context.Context, stateID, contextPath string, backen
 	if err != nil {
 		return err
 	}
-	if err := r.runOperation(ctx, "destroy", result, resultPath); err != nil {
+	return r.runOperation(ctx, "destroy", result, resultPath)
+}
+
+// AuthCleanup reconciles allocation-owned certificates without accessing the
+// main Terraform backend. A supplied attempt ID limits reconciliation to that
+// exact attempt; omitting it permits allocation-wide owner cleanup.
+func (r Runner) AuthCleanup(ctx context.Context, stateID, contextPath, resultPath string, certificateIDs []string, allocationUID, attemptID string) error {
+	if err := ictterraform.ValidateResultPath(resultPath); err != nil {
 		return err
 	}
-	if !r.cleanupAuth(ctx, result) {
-		if err := recordAuthCleanupFailure(resultPath); err != nil {
-			fmt.Fprintln(r.stderr(), "ict: auth cleanup unavailable")
-			return nil
-		}
-		fmt.Fprintln(r.stderr(), "ict: auth cleanup unavailable")
+	result, err := ReadAuthContext(contextPath)
+	if err != nil {
+		return err
 	}
-	return nil
+	if result.StateID != stateID {
+		return errors.New("frozen auth context does not match lifecycle operation identifier")
+	}
+	if result.Values.AuthPolicy == nil || result.Values.ClusterMode != "vpc" {
+		return writeAuthCleanupOperationResult(resultPath, "auth-cleanup", &certificateCleanupOutcome{Status: "cleaned"})
+	}
+	if allocationUID == "" {
+		return errors.New("invalid certificate cleanup ownership")
+	}
+	var attempt *AuthAttempt
+	if attemptID != "" {
+		value := AuthAttempt{AllocationUID: allocationUID, AttemptID: attemptID}
+		if err := validateAuthAttempt(value); err != nil {
+			return err
+		}
+		attempt = &value
+	}
+	references := make([]AuthCertificateReference, 0, len(certificateIDs))
+	seen := make(map[string]struct{}, len(certificateIDs))
+	for _, certificateID := range certificateIDs {
+		if certificateID == "" || len(certificateID) > 256 {
+			return errors.New("invalid certificate cleanup reference")
+		}
+		if _, duplicate := seen[certificateID]; duplicate {
+			continue
+		}
+		seen[certificateID] = struct{}{}
+		references = append(references, AuthCertificateReference{ID: certificateID, AllocationUID: allocationUID, AttemptID: attemptID})
+	}
+	outcome := r.cleanupCertificates(ctx, *result.Values.AuthPolicy, result.Recovery.Endpoints, allocationUID, attempt, references...)
+	return writeAuthCleanupOperationResult(resultPath, "auth-cleanup", &outcome)
 }
 
 func (r Runner) infrastructureTimeout() time.Duration {
@@ -534,19 +633,8 @@ func writeOperationResult(path, operation, workspace string) error {
 	return writeBoundedOperationResult(path, OperationResult{Version: 1, Operation: operation, Workspace: workspace})
 }
 
-func recordAuthCleanupFailure(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read destroy result: %w", err)
-	}
-	var result OperationResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		return fmt.Errorf("decode destroy result: %w", err)
-	}
-	if result.Version != 1 || result.Operation != "destroy" {
-		return errors.New("invalid destroy result")
-	}
-	result.AuthCleanup = "failed"
+func writeAuthCleanupOperationResult(path, operation string, outcome *certificateCleanupOutcome) error {
+	result := OperationResult{Version: 1, Operation: operation, AuthCleanup: outcome.Status, CleanupOutcome: outcome.Status, CleanupReason: outcome.Reason, CleanupStage: outcome.Stage, Certificate: outcome.Certificate}
 	return writeBoundedOperationResult(path, result)
 }
 
@@ -620,6 +708,9 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 	if strings.TrimSpace(supplied.ResourceGroup) == "" {
 		return Values{}, config.ResolvedTarget{}, errors.New("resource group is required")
 	}
+	if supplied.PrivateOnly && provider != config.ProviderVPCGen2 {
+		return Values{}, config.ResolvedTarget{}, errors.New("private-only requires VPC Gen 2")
+	}
 	minimumWorkers := 1
 	if supplied.Platform == "openshift" && provider != config.ProviderSatellite {
 		minimumWorkers = 2
@@ -662,12 +753,15 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 		if err := validateAuthPolicy(supplied.AuthPolicy); err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
+		if supplied.PrivateOnly && !supplied.AuthPolicy.Enabled() {
+			return Values{}, config.ResolvedTarget{}, errors.New("private-only requires VPN authentication policy")
+		}
 		var authPolicy *AuthPolicy
 		if supplied.AuthPolicy.Enabled() {
 			policy := supplied.AuthPolicy
 			authPolicy = &policy
 		}
-		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Zone: supplied.Zone, Flavor: supplied.Flavor, AccountID: supplied.AccountID, VPCRegion: supplied.VPCRegion, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), AuthPolicy: authPolicy}, target, nil
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, PrivateOnly: supplied.PrivateOnly, Zone: supplied.Zone, Flavor: supplied.Flavor, AccountID: supplied.AccountID, VPCRegion: supplied.VPCRegion, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), AuthPolicy: authPolicy}, target, nil
 	case config.ProviderClassic:
 		if !datacenterPattern.MatchString(supplied.Datacenter) {
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid datacenter %q", supplied.Datacenter)
@@ -1450,6 +1544,77 @@ func marshalJSON(value any) ([]byte, error) {
 	return data, nil
 }
 
+// ReadAuthContext strictly validates the backend-free handoff used by auth and
+// auth-cleanup. Backend and plan fields are unknown by contract and rejected
+// during decoding before any operation can initialize Terraform.
+func ReadAuthContext(path string) (AuthContext, error) {
+	if err := ictterraform.ValidateResultPath(path); err != nil {
+		return AuthContext{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return AuthContext{}, fmt.Errorf("read auth context %q: %w", path, err)
+	}
+	type recoveryWire struct {
+		Endpoints                        *config.Endpoints `json:"endpoints"`
+		Values                           *Values           `json:"values"`
+		SatelliteSSHPublicKeyFingerprint *string           `json:"satellite_ssh_public_key_fingerprint"`
+		TFVarsSHA256                     *string           `json:"tfvars_sha256"`
+	}
+	type contextWire struct {
+		Version  *int          `json:"version"`
+		StateID  *string       `json:"state_id"`
+		Values   *Values       `json:"values"`
+		Recovery *recoveryWire `json:"recovery"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var decoded contextWire
+	if err := decoder.Decode(&decoded); err != nil {
+		return AuthContext{}, fmt.Errorf("decode auth context: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return AuthContext{}, errors.New("auth context contains trailing JSON")
+	}
+	if decoded.Version == nil || decoded.StateID == nil || decoded.Values == nil || decoded.Recovery == nil || decoded.Recovery.Endpoints == nil || decoded.Recovery.Values == nil || decoded.Recovery.SatelliteSSHPublicKeyFingerprint == nil || decoded.Recovery.TFVarsSHA256 == nil {
+		return AuthContext{}, errors.New("auth context is incomplete")
+	}
+	result := AuthContext{
+		Version: *decoded.Version,
+		StateID: *decoded.StateID,
+		Values:  *decoded.Values,
+		Recovery: AuthRecoveryContext{
+			Endpoints:                        *decoded.Recovery.Endpoints,
+			Values:                           *decoded.Recovery.Values,
+			SatelliteSSHPublicKeyFingerprint: *decoded.Recovery.SatelliteSSHPublicKeyFingerprint,
+			TFVarsSHA256:                     *decoded.Recovery.TFVarsSHA256,
+		},
+	}
+	if result.Version != 1 {
+		return AuthContext{}, fmt.Errorf("unsupported auth context version %d", result.Version)
+	}
+	if err := ictterraform.ValidateStateID(result.StateID); err != nil {
+		return AuthContext{}, fmt.Errorf("invalid auth context lifecycle operation identifier: %w", err)
+	}
+	values, err := recoveryValuesFromTFVars(result.Values, result.Recovery.SatelliteSSHPublicKeyFingerprint)
+	if err != nil || !reflect.DeepEqual(values, result.Recovery.Values) {
+		return AuthContext{}, errors.New("invalid auth context values")
+	}
+	tfvars, err := marshalJSON(result.Values)
+	if err != nil || result.Recovery.TFVarsSHA256 != tfvarsSHA256(tfvars) {
+		return AuthContext{}, errors.New("invalid auth context values")
+	}
+	provider, err := validateRecoveryValues(result.Recovery.Values, result.Recovery.SatelliteSSHPublicKeyFingerprint)
+	if err != nil {
+		return AuthContext{}, errors.New("invalid auth context recovery")
+	}
+	contextTarget := config.Target{Providers: []config.Provider{provider}, DefaultRegion: result.Recovery.Values.Region, Endpoints: result.Recovery.Endpoints}
+	if _, err := (&config.Config{Version: config.Version, Targets: map[string]config.Target{"auth": contextTarget}}).ResolveTarget("auth", nil); err != nil {
+		return AuthContext{}, errors.New("invalid auth context recovery")
+	}
+	return result, nil
+}
+
 // ReadPlanResult strictly validates a serialized plan handoff before a later operation uses it.
 func ReadPlanResult(path string) (PlanResult, error) {
 	if err := ictterraform.ValidateResultPath(path); err != nil {
@@ -1514,6 +1679,13 @@ func infrastructureTFVars(values Values) ([]byte, error) {
 	if err := json.Unmarshal(data, &variables); err != nil {
 		return nil, err
 	}
+	if vpnServerID := authPolicyValue(values.AuthPolicy).VPNServerID; vpnServerID != "" {
+		vpnServer, err := json.Marshal(vpnServerID)
+		if err != nil {
+			return nil, err
+		}
+		variables["auth_vpn_server_id"] = vpnServer
+	}
 	delete(variables, "auth_policy")
 	return marshalJSON(variables)
 }
@@ -1566,11 +1738,14 @@ func validateRecoveryValues(values Values, fingerprint string) (config.Provider,
 		}
 		return config.ProviderVPCGen2, nil
 	case "classic":
-		if !datacenterPattern.MatchString(values.Datacenter) || !flavorPattern.MatchString(values.MachineType) || !vlanPattern.MatchString(values.PublicVLANID) || !vlanPattern.MatchString(values.PrivateVLANID) || !classicClusterPattern.MatchString(values.ClusterName) || fingerprint != "" || !emptyValues(values, "classic") {
+		if values.PrivateOnly || !datacenterPattern.MatchString(values.Datacenter) || !flavorPattern.MatchString(values.MachineType) || !vlanPattern.MatchString(values.PublicVLANID) || !vlanPattern.MatchString(values.PrivateVLANID) || !classicClusterPattern.MatchString(values.ClusterName) || fingerprint != "" || !emptyValues(values, "classic") {
 			return "", errors.New("invalid recovery values")
 		}
 		return config.ProviderClassic, nil
 	case "satellite":
+		if values.PrivateOnly {
+			return "", errors.New("invalid recovery values")
+		}
 		region, err := satelliteRegion(values.SatelliteZones)
 		usingReusedWorkers := len(values.SatelliteWorkerInstanceIDs) > 0
 		usingManagedKey := !usingReusedWorkers && values.SatelliteSSHKeyID != ""
@@ -1593,7 +1768,7 @@ func validateAuthPolicy(policy AuthPolicy) error {
 		value string
 		limit int
 	}{
-		{"allocation UID", policy.AllocationUID, 128}, {"VPN server ID", policy.VPNServerID, 256}, {"Secrets Manager ID", policy.SecretsManagerID, 256}, {"Secrets Manager region", policy.SecretsManagerRegion, 64}, {"secret group ID", policy.SecretGroupID, 256}, {"certificate template", policy.CertificateTemplate, 256}, {"issuer", policy.Issuer, 256}, {"TTL", policy.TTL, 32},
+		{"VPN server ID", policy.VPNServerID, 256}, {"Secrets Manager ID", policy.SecretsManagerID, 256}, {"Secrets Manager region", policy.SecretsManagerRegion, 64}, {"secret group ID", policy.SecretGroupID, 256}, {"certificate template", policy.CertificateTemplate, 256}, {"issuer", policy.Issuer, 256}, {"TTL", policy.TTL, 32},
 	} {
 		if value.value == "" || len(value.value) > value.limit || strings.TrimSpace(value.value) != value.value || strings.ContainsFunc(value.value, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 			return fmt.Errorf("invalid auth policy %s", value.name)
@@ -1602,7 +1777,29 @@ func validateAuthPolicy(policy AuthPolicy) error {
 	if _, err := time.ParseDuration(policy.TTL); err != nil {
 		return errors.New("invalid auth policy TTL")
 	}
+	if !serviceEndpointLabel(policy.SecretsManagerID) || !serviceEndpointLabel(policy.SecretsManagerRegion) {
+		return errors.New("invalid auth policy Secrets Manager endpoint")
+	}
 	return nil
+}
+
+func validateAuthAttempt(attempt AuthAttempt) error {
+	if ictterraform.ValidateStateID(attempt.AllocationUID) != nil || ictterraform.ValidateStateID(attempt.AttemptID) != nil {
+		return errors.New("invalid auth attempt")
+	}
+	return nil
+}
+
+func serviceEndpointLabel(value string) bool {
+	if value == "" || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, character := range value {
+		if character != '-' && (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func emptyValues(values Values, provider string) bool {

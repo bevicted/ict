@@ -23,9 +23,25 @@ import (
 )
 
 const (
-	defaultAuthTimeout = 5 * time.Minute
-	maxAuthOutputBytes = 64 * 1024
-	maxAuthManifest    = 4 * 1024
+	defaultAuthTimeout    = 5 * time.Minute
+	maxAuthOutputBytes    = 64 * 1024
+	maxAuthManifest       = 4 * 1024
+	maxAuthTmpfsBytes     = 512 << 20
+	minAuthTmpfsFreeBytes = 384 << 20
+	authOutputLockName    = ".ict-auth-export.lock"
+
+	vpnCertificateLeafParseReason         vpnCertificateReason = "vpn-certificate-leaf-parse"
+	vpnCertificateLeafUsageReason         vpnCertificateReason = "vpn-certificate-leaf-usage"
+	vpnCertificateKeyParseReason          vpnCertificateReason = "vpn-certificate-key-parse"
+	vpnCertificateKeyMismatchReason       vpnCertificateReason = "vpn-certificate-key-mismatch"
+	vpnCertificateChainParseReason        vpnCertificateReason = "vpn-certificate-chain-parse"
+	vpnCertificateChainAuthorityReason    vpnCertificateReason = "vpn-certificate-chain-authority"
+	vpnCertificateChainNoRootReason       vpnCertificateReason = "vpn-certificate-chain-no-root"
+	vpnCertificateChainVerifyReason       vpnCertificateReason = "vpn-certificate-chain-verify"
+	vpnCertificateLeafVerifyReason        vpnCertificateReason = "vpn-certificate-leaf-verify"
+	vpnCertificateServerEKUReason         vpnCertificateReason = "vpn-certificate-server-eku"
+	vpnCertificateExpiryMismatchReason    vpnCertificateReason = "vpn-certificate-expiry-mismatch"
+	vpnCertificateAuthorityMismatchReason vpnCertificateReason = "vpn-certificate-authority-mismatch"
 )
 
 // AuthExport identifies private artifact and safe-manifest destinations. Supplying
@@ -37,17 +53,29 @@ type AuthExport struct {
 
 // AuthManifest is the bounded non-secret handoff for an optional auth export.
 type AuthManifest struct {
-	Version      int            `json:"version"`
-	Availability string         `json:"availability"`
-	Reason       string         `json:"reason,omitempty"`
-	Artifacts    []AuthArtifact `json:"artifacts,omitempty"`
-	Mode         string         `json:"mode,omitempty"`
-	Expiry       string         `json:"expiry,omitempty"`
+	Version        int                       `json:"version"`
+	Availability   string                    `json:"availability"`
+	Reason         string                    `json:"reason,omitempty"`
+	CleanupOutcome string                    `json:"cleanup_outcome,omitempty"`
+	CleanupReason  string                    `json:"cleanup_reason,omitempty"`
+	CleanupStage   cleanupStage              `json:"cleanup_stage,omitempty"`
+	Artifacts      []AuthArtifact            `json:"artifacts,omitempty"`
+	Mode           string                    `json:"mode,omitempty"`
+	Expiry         string                    `json:"expiry,omitempty"`
+	Certificate    *AuthCertificateReference `json:"certificate,omitempty"`
 }
 
 // AuthArtifact describes a private artifact without serializing its contents.
 type AuthArtifact struct {
 	Name string `json:"name"`
+}
+
+// AuthCertificateReference is the bounded, non-secret identity required to
+// verify ownership before deleting an allocation certificate.
+type AuthCertificateReference struct {
+	ID            string `json:"id,omitempty"`
+	AllocationUID string `json:"allocation_uid"`
+	AttemptID     string `json:"attempt_id"`
 }
 
 // SensitiveCommandRunner captures a credential-adjacent command result without
@@ -99,9 +127,43 @@ func (r Runner) authTimeout() time.Duration {
 	return defaultAuthTimeout
 }
 
-func (r Runner) authEnvironment(endpoints config.Endpoints) []string {
+// AuthTmpfsVerifier verifies a caller-owned tmpfs mount has the bounded
+// capacity contract needed for Terraform state, provider cache, and workspace.
+type AuthTmpfsVerifier func(string, int64, int64) (string, error)
+
+var defaultAuthTmpfsVerifier AuthTmpfsVerifier = verifyAuthTmpfs
+
+// authWorkspace creates state only below the caller-provided bounded tmpfs mount.
+func (r Runner) authWorkspace(tmpfsDir string) (string, error) {
+	root, err := r.validateAuthTmpfs(tmpfsDir)
+	if err != nil {
+		return "", err
+	}
+	workspace, err := os.MkdirTemp(root, "ict-auth-")
+	if err != nil {
+		return "", errors.New("create auth tmpfs workspace")
+	}
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		_ = os.RemoveAll(workspace)
+		return "", errors.New("protect auth tmpfs workspace")
+	}
+	return workspace, nil
+}
+
+func (r Runner) validateAuthTmpfs(tmpfsDir string) (string, error) {
+	if tmpfsDir == "" || !filepath.IsAbs(tmpfsDir) {
+		return "", errors.New("auth tmpfs directory must be absolute")
+	}
+	verifier := r.AuthTmpfsVerifier
+	if verifier == nil {
+		verifier = defaultAuthTmpfsVerifier
+	}
+	return verifier(tmpfsDir, maxAuthTmpfsBytes, minAuthTmpfsFreeBytes)
+}
+
+func (r Runner) authEnvironment(endpoints config.Endpoints, workspace string) []string {
 	environment := r.environment(config.ResolvedTarget{Target: config.Target{Endpoints: endpoints}}.Environment())
-	values := make(map[string]string, len(environment)+3)
+	values := make(map[string]string, len(environment)+10)
 	for _, entry := range environment {
 		if key, value, ok := strings.Cut(entry, "="); ok {
 			values[key] = value
@@ -110,6 +172,19 @@ func (r Runner) authEnvironment(endpoints config.Endpoints) []string {
 	values["TF_LOG"] = "OFF"
 	values["TF_LOG_CORE"] = "OFF"
 	values["TF_LOG_PROVIDER"] = "OFF"
+	if workspace != "" {
+		// Auth subprocesses use only the verified tmpfs workspace for scratch
+		// and user-scoped state.
+		values["HOME"] = filepath.Join(workspace, "home")
+		values["TMPDIR"] = filepath.Join(workspace, "tmp")
+		values["TF_DATA_DIR"] = filepath.Join(workspace, "tf-data")
+		values["TF_PLUGIN_CACHE_DIR"] = filepath.Join(workspace, "plugin-cache")
+		values["TF_WORKSPACE"] = "default"
+		values["XDG_CACHE_HOME"] = filepath.Join(workspace, "cache")
+		values["XDG_CONFIG_HOME"] = filepath.Join(workspace, "config")
+		values["XDG_DATA_HOME"] = filepath.Join(workspace, "data")
+		values["XDG_STATE_HOME"] = filepath.Join(workspace, "state")
+	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
@@ -145,166 +220,291 @@ func validateAuthExport(export AuthExport) error {
 	return nil
 }
 
-func (r Runner) exportAuth(ctx context.Context, result PlanResult, export AuthExport) {
-	if export.ManifestPath == "" {
-		return
+var errAuthOutputLocked = errors.New("auth output directory is already in use")
+
+type redactedAuthExportError struct {
+	operation string
+	err       error
+}
+
+func (e redactedAuthExportError) Error() string {
+	return "auth export " + e.operation + " failed"
+}
+
+func (e redactedAuthExportError) Unwrap() error {
+	return e.err
+}
+
+func redactAuthExportError(operation string, err error) error {
+	if err == nil {
+		return nil
 	}
-	manifest := AuthManifest{Version: 1, Availability: "unavailable"}
+	return redactedAuthExportError{operation: operation, err: err}
+}
+
+func prepareAuthOutput(outputDir string) (func() error, error) {
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create auth output directory: %w", err)
+	}
+	info, err := os.Lstat(outputDir)
+	if err != nil {
+		return nil, fmt.Errorf("inspect auth output directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, errors.New("auth output directory must be a directory")
+	}
+	release, err := lockAuthOutput(outputDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := removeAuthArtifacts(outputDir); err != nil {
+		if releaseErr := release(); releaseErr != nil {
+			return nil, errors.Join(err, releaseErr)
+		}
+		return nil, err
+	}
+	return release, nil
+}
+
+func lockAuthOutput(outputDir string) (func() error, error) {
+	path := filepath.Join(outputDir, authOutputLockName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil, errAuthOutputLocked
+	}
+	if err != nil {
+		return nil, errors.New("auth output directory lock is unavailable")
+	}
+	return func() error {
+		closeErr := file.Close()
+		removeErr := os.Remove(path)
+		if closeErr != nil || removeErr != nil {
+			return errors.New("release auth output lock")
+		}
+		return nil
+	}, nil
+}
+
+func removeAuthArtifacts(outputDir string) error {
+	for _, name := range []string{"kubeconfig.yaml", "client.ovpn"} {
+		path := filepath.Join(outputDir, name)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect auth artifact: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("auth artifact must be a regular file")
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove auth artifact: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r Runner) exportAuth(ctx context.Context, result AuthContext, export AuthExport, tmpfsDir string, attempt AuthAttempt) (resultErr error) {
+	if export.ManifestPath == "" {
+		return nil
+	}
+	release, err := prepareAuthOutput(export.OutputDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := release(); err != nil {
+			resultErr = errors.Join(resultErr, redactAuthExportError("output lock release", err))
+		}
+	}()
+	manifest := AuthManifest{Version: 1, Availability: "unavailable", CleanupOutcome: cleanupOutcomeNotRequired}
 	if result.Values.ClusterMode == "satellite" {
 		manifest.Availability = "unsupported"
-		_ = writeAuthManifest(export.ManifestPath, manifest)
-		return
-	}
-	if err := os.MkdirAll(export.OutputDir, 0o700); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "output-directory")
-		return
+		return r.persistAuthManifest(export.ManifestPath, manifest)
 	}
 	authCtx, cancel := context.WithTimeout(ctx, r.authTimeout())
 	defer cancel()
-	workspace, err := os.MkdirTemp("", "ict-auth-")
+	workspace, err := r.authWorkspace(tmpfsDir)
 	if err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "workspace")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "auth-state-failure")
 	}
 	defer os.RemoveAll(workspace)
-	if err := os.Chmod(workspace, 0o700); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "workspace-permissions")
-		return
-	}
 	if err := r.materializeAuth(workspace); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "assets")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "assets")
+	}
+	for _, directory := range []string{"credentials", "home", "tmp", "tf-data", "plugin-cache", "cache", "config", "data", "state"} {
+		if err := os.Mkdir(filepath.Join(workspace, directory), 0o700); err != nil {
+			return r.unavailableAuth(export.ManifestPath, manifest, "auth-state-failure")
+		}
 	}
 	configDir := filepath.Join(workspace, "credentials")
-	if err := os.Mkdir(configDir, 0o700); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "credentials-directory")
-		return
+	if err := os.Chmod(configDir, 0o700); err != nil {
+		return r.unavailableAuth(export.ManifestPath, manifest, "credentials-directory")
 	}
-	tfvars, err := authTFVars(result.Values, configDir)
+	tfvars, err := authTFVars(result.Values, attempt, configDir)
 	if err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "variables")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "variables")
 	}
 	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
 	if err := ictterraform.AtomicWrite(tfvarsPath, tfvars); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "variables-write")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "variables-write")
 	}
-	if err := ictterraform.MaterializeBackend(workspace); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "backend")
-		return
+	environment := r.authEnvironment(result.Recovery.Endpoints, workspace)
+	if err := r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", "-chdir="+workspace, "init", "-backend=false", "-input=false", "-no-color"); err != nil {
+		return r.unavailableAuth(export.ManifestPath, manifest, "terraform-init")
 	}
-	backend := authBackend(result.Backend)
-	environment := r.authEnvironment(result.Recovery.Endpoints)
-	initArgs := append([]string{"-chdir=" + workspace, "init", "-input=false", "-no-color"}, backend.InitArgs()...)
-	if err := r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", initArgs...); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "terraform-init")
-		return
-	}
-	if err := r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", "-chdir="+workspace, "apply", "-input=false", "-no-color", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "terraform-apply")
-		return
+	if err := r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", "-chdir="+workspace, "apply", "-state="+filepath.Join(workspace, "terraform.tfstate"), "-backup=-", "-input=false", "-no-color", "-auto-approve", "-var-file="+tfvarsPath); err != nil {
+		return r.unavailableAfterVPNFailure(authCtx, export.ManifestPath, manifest, "terraform-apply", result.Values.AuthPolicy, &attempt, result.Recovery.Endpoints, nil)
 	}
 	mode, err := r.authOutput(authCtx, environment, workspace, "auth_mode")
 	if err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "auth-mode")
-		return
+		return r.unavailableAfterVPNFailure(authCtx, export.ManifestPath, manifest, "auth-mode", result.Values.AuthPolicy, &attempt, result.Recovery.Endpoints, nil)
 	}
 	switch mode {
 	case "public":
 		manifest.Mode = "public"
 	case "vpn":
 		if result.Values.AuthPolicy == nil {
-			r.unavailableAuth(export.ManifestPath, manifest, "private-policy")
-			return
+			return r.unavailableAfterVPNFailure(authCtx, export.ManifestPath, manifest, "private-policy", nil, &attempt, result.Recovery.Endpoints, nil)
 		}
-		r.exportVPNAuth(authCtx, environment, workspace, export, manifest, *result.Values.AuthPolicy)
-		return
+		return r.exportVPNAuth(authCtx, environment, workspace, export, manifest, *result.Values.AuthPolicy, attempt, result.Recovery.Endpoints)
 	case "unsupported":
 		manifest.Availability = "unsupported"
-		_ = writeAuthManifest(export.ManifestPath, manifest)
-		return
+		return r.persistAuthManifest(export.ManifestPath, manifest)
 	default:
-		r.unavailableAuth(export.ManifestPath, manifest, "auth-mode")
-		return
+		return r.unavailableAfterVPNFailure(authCtx, export.ManifestPath, manifest, "auth-mode", result.Values.AuthPolicy, &attempt, result.Recovery.Endpoints, nil)
 	}
 	endpoint, err := r.authOutput(authCtx, environment, workspace, "public_endpoint")
 	if err != nil || endpoint == "" {
-		r.unavailableAuth(export.ManifestPath, manifest, "public-endpoint")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "public-endpoint")
 	}
 	ca, err := r.authOutput(authCtx, environment, workspace, "public_ca_certificate")
 	if err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
 	}
 	certificate, err := r.authOutput(authCtx, environment, workspace, "public_admin_certificate")
 	if err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
 	}
 	key, err := r.authOutput(authCtx, environment, workspace, "public_admin_key")
 	if err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "admin-material")
 	}
 	contents, err := renderKubeconfig(endpoint, ca, certificate, key)
 	if err != nil || validateKubeconfig(contents, endpoint) != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-render")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-render")
 	}
 	if err := ictterraform.AtomicWrite(filepath.Join(export.OutputDir, "kubeconfig.yaml"), contents); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-write")
-		return
+		return r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-write")
 	}
 	manifest.Availability = "available"
 	manifest.Artifacts = []AuthArtifact{{Name: "kubeconfig.yaml"}}
-	_ = writeAuthManifest(export.ManifestPath, manifest)
+	if err := r.persistAuthManifest(export.ManifestPath, manifest); err != nil {
+		return r.compensateAvailablePublicManifestFailure(export, err)
+	}
+	return nil
 }
 
-func (r Runner) exportVPNAuth(ctx context.Context, environ []string, workspace string, export AuthExport, manifest AuthManifest, policy AuthPolicy) {
+func (r Runner) compensateAvailablePublicManifestFailure(export AuthExport, availableErr error) error {
+	removalErr := removeAuthArtifacts(export.OutputDir)
+	unavailableErr := r.unavailableAuth(export.ManifestPath, AuthManifest{Version: 1, Availability: "unavailable", CleanupOutcome: cleanupOutcomeNotRequired}, "manifest-write")
+	return errors.Join(
+		redactAuthExportError("available manifest", availableErr),
+		redactAuthExportError("artifact removal", removalErr),
+		redactAuthExportError("unavailable manifest", unavailableErr),
+	)
+}
+
+func (r Runner) exportVPNAuth(ctx context.Context, environ []string, workspace string, export AuthExport, manifest AuthManifest, policy AuthPolicy, attempt AuthAttempt, endpoints config.Endpoints) error {
+	fail := func(reason string, reference *AuthCertificateReference) error {
+		return r.unavailableAfterVPNFailure(ctx, export.ManifestPath, manifest, reason, &policy, &attempt, endpoints, reference)
+	}
 	endpoint, err := r.authOutput(ctx, environ, workspace, "private_endpoint")
 	if err != nil || endpoint == "" {
-		r.unavailableAuth(export.ManifestPath, manifest, "private-endpoint")
-		return
+		return fail("private-endpoint", nil)
 	}
-	outputs := make(map[string]string, 9)
-	for _, name := range []string{"private_ca_certificate", "private_admin_certificate", "private_admin_key", "vpn_profile", "vpn_certificate", "vpn_private_key", "vpn_ca_chain", "vpn_expiry", "vpn_issuer"} {
+	outputs := make(map[string]string, 10)
+	for _, name := range []string{"vpn_certificate_id", "private_ca_certificate", "private_admin_certificate", "private_admin_key", "vpn_profile", "vpn_certificate", "vpn_private_key", "vpn_ca_chain", "vpn_expiry", "vpn_certificate_authority"} {
 		outputs[name], err = r.authOutput(ctx, environ, workspace, name)
 		if err != nil {
-			r.unavailableAuth(export.ManifestPath, manifest, "private-material")
-			return
+			return fail("private-material", nil)
 		}
 	}
+	if outputs["vpn_certificate_id"] == "" {
+		return fail("invalid-artifacts", nil)
+	}
+	reference := &AuthCertificateReference{ID: outputs["vpn_certificate_id"], AllocationUID: attempt.AllocationUID, AttemptID: attempt.AttemptID}
+	manifest.Certificate = reference
 	kubeconfig, err := renderKubeconfig(endpoint, outputs["private_ca_certificate"], outputs["private_admin_certificate"], outputs["private_admin_key"])
 	if err != nil || validateKubeconfig(kubeconfig, endpoint) != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-render")
-		return
+		return fail("kubeconfig-render", reference)
 	}
 	expiry, err := validateVPNCertificate(outputs["vpn_certificate"], outputs["vpn_private_key"], outputs["vpn_ca_chain"], outputs["vpn_expiry"])
-	if err != nil || outputs["vpn_issuer"] != policy.Issuer {
-		r.unavailableAuth(export.ManifestPath, manifest, "vpn-certificate")
-		return
+	if err != nil {
+		return fail(vpnCertificateFailureReason(err), reference)
+	}
+	if outputs["vpn_certificate_authority"] != policy.Issuer {
+		return fail(string(vpnCertificateAuthorityMismatchReason), reference)
 	}
 	profile, err := renderVPNProfile(outputs["vpn_profile"], outputs["vpn_certificate"], outputs["vpn_private_key"], outputs["vpn_ca_chain"])
 	if err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "vpn-profile")
-		return
+		return fail("vpn-profile", reference)
 	}
 	if err := ictterraform.AtomicWrite(filepath.Join(export.OutputDir, "kubeconfig.yaml"), kubeconfig); err != nil {
-		r.unavailableAuth(export.ManifestPath, manifest, "kubeconfig-write")
-		return
+		return fail("kubeconfig-write", reference)
 	}
 	if err := ictterraform.AtomicWrite(filepath.Join(export.OutputDir, "client.ovpn"), profile); err != nil {
-		_ = os.Remove(filepath.Join(export.OutputDir, "kubeconfig.yaml"))
-		r.unavailableAuth(export.ManifestPath, manifest, "vpn-write")
-		return
+		_ = removeAuthArtifacts(export.OutputDir)
+		return fail("vpn-write", reference)
 	}
 	manifest.Availability = "available"
 	manifest.Mode = "vpn"
 	manifest.Expiry = expiry.Format(time.RFC3339)
 	manifest.Artifacts = []AuthArtifact{{Name: "kubeconfig.yaml"}, {Name: "client.ovpn"}}
-	_ = writeAuthManifest(export.ManifestPath, manifest)
+	if err := r.persistAuthManifest(export.ManifestPath, manifest); err != nil {
+		return r.compensateAvailableVPNManifestFailure(ctx, export, policy, attempt, endpoints, reference, err)
+	}
+	return nil
+}
+
+func (r Runner) compensateAvailableVPNManifestFailure(ctx context.Context, export AuthExport, policy AuthPolicy, attempt AuthAttempt, endpoints config.Endpoints, reference *AuthCertificateReference, availableErr error) error {
+	removalErr := removeAuthArtifacts(export.OutputDir)
+	outcome, unavailableErr := r.unavailableAfterVPNFailureOutcome(ctx, export.ManifestPath, AuthManifest{Version: 1, Availability: "unavailable", CleanupOutcome: cleanupOutcomeNotRequired}, "manifest-write", &policy, &attempt, endpoints, reference)
+	var cleanupErr error
+	if outcome.Status == cleanupOutcomePending {
+		cleanupErr = errors.New("certificate cleanup is pending")
+	}
+	return errors.Join(
+		redactAuthExportError("available manifest", availableErr),
+		redactAuthExportError("artifact removal", removalErr),
+		redactAuthExportError("certificate cleanup", cleanupErr),
+		redactAuthExportError("unavailable manifest", unavailableErr),
+	)
+}
+
+func (r Runner) unavailableAfterVPNFailure(ctx context.Context, manifestPath string, manifest AuthManifest, reason string, policy *AuthPolicy, attempt *AuthAttempt, endpoints config.Endpoints, reference *AuthCertificateReference) error {
+	_, err := r.unavailableAfterVPNFailureOutcome(ctx, manifestPath, manifest, reason, policy, attempt, endpoints, reference)
+	return err
+}
+
+func (r Runner) unavailableAfterVPNFailureOutcome(ctx context.Context, manifestPath string, manifest AuthManifest, reason string, policy *AuthPolicy, attempt *AuthAttempt, endpoints config.Endpoints, reference *AuthCertificateReference) (certificateCleanupOutcome, error) {
+	outcome := certificateCleanupOutcome{Status: cleanupOutcomeNotRequired}
+	if policy != nil {
+		references := []AuthCertificateReference{}
+		if reference != nil {
+			references = append(references, *reference)
+		}
+		outcome = r.cleanupCertificates(ctx, *policy, endpoints, attempt.AllocationUID, attempt, references...)
+		manifest.Certificate = nil
+		manifest.CleanupOutcome = outcome.Status
+		manifest.CleanupReason = outcome.Reason
+		manifest.CleanupStage = outcome.Stage
+		if outcome.Status == cleanupOutcomePending {
+			manifest.Certificate = outcome.Certificate
+		}
+	}
+	return outcome, r.unavailableAuth(manifestPath, manifest, reason)
 }
 
 type certificateChain struct {
@@ -312,16 +512,91 @@ type certificateChain struct {
 	intermediates *x509.CertPool
 }
 
+type vpnCertificateReason string
+
+func (reason vpnCertificateReason) Error() string {
+	return string(reason)
+}
+
+func vpnCertificateFailureReason(err error) string {
+	var reason vpnCertificateReason
+	if errors.As(err, &reason) {
+		return string(reason)
+	}
+	return string(vpnCertificateLeafVerifyReason)
+}
+
 func validateVPNCertificate(certificatePEM, keyPEM, chainPEM, reportedExpiry string) (time.Time, error) {
-	certificate, err := validateCertificateAndKey(certificatePEM, keyPEM, chainPEM, x509.ExtKeyUsageClientAuth)
+	certificate, err := validateVPNCertificateAndKey(certificatePEM, keyPEM, chainPEM)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid VPN certificate: %w", err)
+		return time.Time{}, err
+	}
+	if containsUsage(certificate.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
+		return time.Time{}, vpnCertificateServerEKUReason
 	}
 	reported, err := time.Parse(time.RFC3339, reportedExpiry)
 	if err != nil || !reported.Equal(certificate.NotAfter.UTC()) {
-		return time.Time{}, errors.New("VPN expiry does not match certificate")
+		return time.Time{}, vpnCertificateExpiryMismatchReason
 	}
 	return certificate.NotAfter.UTC(), nil
+}
+
+// validateVPNCertificateAndKey verifies the client presentation chain separately
+// from trust bundles. Its final supplied CA is the explicit trust anchor.
+func validateVPNCertificateAndKey(certificatePEM, keyPEM, chainPEM string) (*x509.Certificate, error) {
+	certificates, err := parseCertificates(certificatePEM)
+	if err != nil || len(certificates) != 1 {
+		return nil, vpnCertificateLeafParseReason
+	}
+	certificate := certificates[0]
+	now := time.Now()
+	if !certificateValidAt(certificate, now) || certificate.IsCA || certificate.KeyUsage&x509.KeyUsageDigitalSignature == 0 || !containsUsage(certificate.ExtKeyUsage, x509.ExtKeyUsageClientAuth) {
+		return nil, vpnCertificateLeafUsageReason
+	}
+	key, err := parsePrivateKey(keyPEM)
+	if err != nil {
+		return nil, vpnCertificateKeyParseReason
+	}
+	if !publicKeysEqual(key.Public(), certificate.PublicKey) {
+		return nil, vpnCertificateKeyMismatchReason
+	}
+	chain, err := parseVPNPresentationChain(chainPEM, certificate, now)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := certificate.Verify(x509.VerifyOptions{Roots: chain.roots, Intermediates: chain.intermediates, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return nil, vpnCertificateLeafVerifyReason
+	}
+	return certificate, nil
+}
+
+func parseVPNPresentationChain(value string, leaf *x509.Certificate, now time.Time) (certificateChain, error) {
+	certificates, err := parseCertificates(value)
+	if err != nil || len(certificates) == 0 {
+		return certificateChain{}, vpnCertificateChainParseReason
+	}
+	for _, certificate := range certificates {
+		if !certificateValidAt(certificate, now) || !certificate.IsCA || certificate.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return certificateChain{}, vpnCertificateChainAuthorityReason
+		}
+	}
+	if leaf.CheckSignatureFrom(certificates[0]) != nil {
+		return certificateChain{}, vpnCertificateChainVerifyReason
+	}
+	for index := 0; index+1 < len(certificates); index++ {
+		if certificates[index].CheckSignatureFrom(certificates[index+1]) != nil {
+			return certificateChain{}, vpnCertificateChainVerifyReason
+		}
+	}
+	chain := certificateChain{roots: x509.NewCertPool(), intermediates: x509.NewCertPool()}
+	for index, certificate := range certificates {
+		if index == len(certificates)-1 {
+			chain.roots.AddCert(certificate)
+		} else {
+			chain.intermediates.AddCert(certificate)
+		}
+	}
+	return chain, nil
 }
 
 func validateKubeconfigMaterial(caPEM, certificatePEM, keyPEM string) error {
@@ -332,26 +607,26 @@ func validateKubeconfigMaterial(caPEM, certificatePEM, keyPEM string) error {
 func validateCertificateAndKey(certificatePEM, keyPEM, chainPEM string, usage x509.ExtKeyUsage) (*x509.Certificate, error) {
 	certificates, err := parseCertificates(certificatePEM)
 	if err != nil || len(certificates) != 1 {
-		return nil, errors.New("invalid leaf certificate")
+		return nil, vpnCertificateLeafParseReason
 	}
 	certificate := certificates[0]
 	now := time.Now()
 	if !certificateValidAt(certificate, now) || certificate.IsCA || certificate.KeyUsage&x509.KeyUsageDigitalSignature == 0 || !containsUsage(certificate.ExtKeyUsage, usage) {
-		return nil, errors.New("invalid leaf certificate usage")
+		return nil, vpnCertificateLeafUsageReason
 	}
 	key, err := parsePrivateKey(keyPEM)
 	if err != nil {
-		return nil, err
+		return nil, vpnCertificateKeyParseReason
 	}
 	if !publicKeysEqual(key.Public(), certificate.PublicKey) {
-		return nil, errors.New("certificate and private key do not match")
+		return nil, vpnCertificateKeyMismatchReason
 	}
 	chain, err := parseCertificateChain(chainPEM, now)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := certificate.Verify(x509.VerifyOptions{Roots: chain.roots, Intermediates: chain.intermediates, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{usage}}); err != nil {
-		return nil, fmt.Errorf("certificate chain verification failed: %w", err)
+		return nil, vpnCertificateLeafVerifyReason
 	}
 	return certificate, nil
 }
@@ -359,13 +634,13 @@ func validateCertificateAndKey(certificatePEM, keyPEM, chainPEM string, usage x5
 func parseCertificateChain(value string, now time.Time) (certificateChain, error) {
 	certificates, err := parseCertificates(value)
 	if err != nil || len(certificates) == 0 {
-		return certificateChain{}, errors.New("invalid certificate chain")
+		return certificateChain{}, vpnCertificateChainParseReason
 	}
 	chain := certificateChain{roots: x509.NewCertPool(), intermediates: x509.NewCertPool()}
 	roots := 0
 	for _, certificate := range certificates {
 		if !certificateValidAt(certificate, now) || !certificate.IsCA || certificate.KeyUsage&x509.KeyUsageCertSign == 0 {
-			return certificateChain{}, errors.New("invalid certificate authority")
+			return certificateChain{}, vpnCertificateChainAuthorityReason
 		}
 		if certificate.CheckSignatureFrom(certificate) == nil {
 			chain.roots.AddCert(certificate)
@@ -375,14 +650,14 @@ func parseCertificateChain(value string, now time.Time) (certificateChain, error
 		}
 	}
 	if roots == 0 {
-		return certificateChain{}, errors.New("certificate chain has no trust root")
+		return certificateChain{}, vpnCertificateChainNoRootReason
 	}
 	for _, certificate := range certificates {
 		if certificate.CheckSignatureFrom(certificate) == nil {
 			continue
 		}
 		if _, err := certificate.Verify(x509.VerifyOptions{Roots: chain.roots, Intermediates: chain.intermediates, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
-			return certificateChain{}, fmt.Errorf("certificate authority chain verification failed: %w", err)
+			return certificateChain{}, vpnCertificateChainVerifyReason
 		}
 	}
 	return chain, nil
@@ -657,14 +932,30 @@ func isVPNPort(value string) bool {
 	return err == nil && port > 0
 }
 
-func (r Runner) unavailableAuth(path string, manifest AuthManifest, reason string) {
+func (r Runner) unavailableAuth(path string, manifest AuthManifest, reason string) error {
 	manifest.Reason = reason
+	if manifest.CleanupOutcome == "" {
+		manifest.CleanupOutcome = cleanupOutcomeNotRequired
+	}
 	var diagnostic strings.Builder
 	diagnostic.WriteString("ict: public auth unavailable: ")
 	diagnostic.WriteString(reason)
 	diagnostic.WriteByte('\n')
 	_, _ = io.WriteString(r.stderr(), diagnostic.String())
-	_ = writeAuthManifest(path, manifest)
+	return r.persistAuthManifest(path, manifest)
+}
+
+func (r Runner) persistAuthManifest(path string, manifest AuthManifest) error {
+	if r.AuthManifestWriter != nil {
+		if err := r.AuthManifestWriter(path, manifest); err != nil {
+			return fmt.Errorf("persist auth manifest: %w", err)
+		}
+		return nil
+	}
+	if err := writeAuthManifest(path, manifest); err != nil {
+		return fmt.Errorf("persist auth manifest: %w", err)
+	}
+	return nil
 }
 
 func (r Runner) authOutput(ctx context.Context, environ []string, workspace, name string) (string, error) {
@@ -675,45 +966,6 @@ func (r Runner) authOutput(ctx context.Context, environ []string, workspace, nam
 	return strings.TrimSpace(string(output)), nil
 }
 
-// cleanupAuth destroys only the allocation certificate from the companion state.
-// Its independent root deliberately has no cluster or VPN data sources.
-func (r Runner) cleanupAuth(ctx context.Context, result PlanResult) bool {
-	if result.Values.AuthPolicy == nil {
-		return true
-	}
-	authCtx, cancel := context.WithTimeout(ctx, r.authTimeout())
-	defer cancel()
-	workspace, err := os.MkdirTemp("", "ict-auth-cleanup-")
-	if err != nil {
-		return false
-	}
-	defer os.RemoveAll(workspace)
-	if err := os.Chmod(workspace, 0o700); err != nil {
-		return false
-	}
-	if err := ictterraform.MaterializeAuthCleanup(workspace); err != nil {
-		return false
-	}
-	if err := ictterraform.MaterializeBackend(workspace); err != nil {
-		return false
-	}
-	tfvars, err := cleanupTFVars(*result.Values.AuthPolicy)
-	if err != nil {
-		return false
-	}
-	tfvarsPath := filepath.Join(workspace, ictterraform.TFVarsName)
-	if err := ictterraform.AtomicWrite(tfvarsPath, tfvars); err != nil {
-		return false
-	}
-	environment := r.authEnvironment(result.Recovery.Endpoints)
-	backend := authBackend(result.Backend)
-	initArgs := append([]string{"-chdir=" + workspace, "init", "-input=false", "-no-color"}, backend.InitArgs()...)
-	if r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", initArgs...) != nil {
-		return false
-	}
-	return r.terraform().Run(authCtx, environment, io.Discard, io.Discard, "terraform", "-chdir="+workspace, "destroy", "-input=false", "-no-color", "-auto-approve", "-refresh=false", "-var-file="+tfvarsPath) == nil
-}
-
 func (r Runner) materializeAuth(workspace string) error {
 	if r.MaterializeAuth != nil {
 		return r.MaterializeAuth(workspace)
@@ -721,12 +973,7 @@ func (r Runner) materializeAuth(workspace string) error {
 	return ictterraform.MaterializeAuth(workspace)
 }
 
-func authBackend(backend ictterraform.BackendConfig) ictterraform.BackendConfig {
-	backend.Key += ".auth"
-	return backend
-}
-
-func authTFVars(values Values, configDir string) ([]byte, error) {
+func authTFVars(values Values, attempt AuthAttempt, configDir string) ([]byte, error) {
 	data, err := json.Marshal(struct {
 		ClusterName              string `json:"cluster_name"`
 		ClusterMode              string `json:"cluster_mode"`
@@ -734,6 +981,7 @@ func authTFVars(values Values, configDir string) ([]byte, error) {
 		Region                   string `json:"region"`
 		ConfigDir                string `json:"config_dir"`
 		AuthAllocationUID        string `json:"auth_allocation_uid"`
+		AuthAttemptID            string `json:"auth_attempt_id"`
 		AuthVPNServerID          string `json:"auth_vpn_server_id"`
 		AuthSecretsManagerID     string `json:"auth_secrets_manager_id"`
 		AuthSecretsManagerRegion string `json:"auth_secrets_manager_region"`
@@ -741,7 +989,7 @@ func authTFVars(values Values, configDir string) ([]byte, error) {
 		AuthCertificateTemplate  string `json:"auth_certificate_template"`
 		AuthIssuer               string `json:"auth_issuer"`
 		AuthTTL                  string `json:"auth_ttl"`
-	}{values.ClusterName, values.ClusterMode, values.ResourceGroupName, values.Region, configDir, authPolicyValue(values.AuthPolicy).AllocationUID, authPolicyValue(values.AuthPolicy).VPNServerID, authPolicyValue(values.AuthPolicy).SecretsManagerID, authPolicyValue(values.AuthPolicy).SecretsManagerRegion, authPolicyValue(values.AuthPolicy).SecretGroupID, authPolicyValue(values.AuthPolicy).CertificateTemplate, authPolicyValue(values.AuthPolicy).Issuer, authPolicyValue(values.AuthPolicy).TTL})
+	}{values.ClusterName, values.ClusterMode, values.ResourceGroupName, values.Region, configDir, attempt.AllocationUID, attempt.AttemptID, authPolicyValue(values.AuthPolicy).VPNServerID, authPolicyValue(values.AuthPolicy).SecretsManagerID, authPolicyValue(values.AuthPolicy).SecretsManagerRegion, authPolicyValue(values.AuthPolicy).SecretGroupID, authPolicyValue(values.AuthPolicy).CertificateTemplate, authPolicyValue(values.AuthPolicy).Issuer, authPolicyValue(values.AuthPolicy).TTL})
 	if err != nil {
 		return nil, err
 	}
@@ -753,17 +1001,6 @@ func authPolicyValue(policy *AuthPolicy) AuthPolicy {
 		return AuthPolicy{}
 	}
 	return *policy
-}
-
-func cleanupTFVars(policy AuthPolicy) ([]byte, error) {
-	return json.Marshal(struct {
-		AuthAllocationUID        string `json:"auth_allocation_uid"`
-		AuthSecretsManagerID     string `json:"auth_secrets_manager_id"`
-		AuthSecretsManagerRegion string `json:"auth_secrets_manager_region"`
-		AuthSecretGroupID        string `json:"auth_secret_group_id"`
-		AuthCertificateTemplate  string `json:"auth_certificate_template"`
-		AuthTTL                  string `json:"auth_ttl"`
-	}{policy.AllocationUID, policy.SecretsManagerID, policy.SecretsManagerRegion, policy.SecretGroupID, policy.CertificateTemplate, policy.TTL})
 }
 
 func writeAuthManifest(path string, manifest AuthManifest) error {

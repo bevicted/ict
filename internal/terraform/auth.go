@@ -11,17 +11,9 @@ import (
 //go:embed auth-assets/main.tf auth-assets/variables.tf auth-assets/.terraform.lock.hcl
 var authAssets embed.FS
 
-//go:embed auth-cleanup-assets/main.tf auth-cleanup-assets/variables.tf auth-cleanup-assets/.terraform.lock.hcl
-var authCleanupAssets embed.FS
-
 // MaterializeAuth writes the isolated public-auth Terraform root.
 func MaterializeAuth(workspace string) error {
 	return materializeAuthRoot(workspace, authAssets, "auth-assets")
-}
-
-// MaterializeAuthCleanup writes the cluster-independent companion-state cleanup root.
-func MaterializeAuthCleanup(workspace string) error {
-	return materializeAuthRoot(workspace, authCleanupAssets, "auth-cleanup-assets")
 }
 
 func materializeAuthRoot(workspace string, assets fs.FS, root string) error {

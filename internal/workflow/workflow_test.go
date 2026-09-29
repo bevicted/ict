@@ -14,20 +14,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bevicted/ict/internal/config"
 	ictterraform "github.com/bevicted/ict/internal/terraform"
 )
 
 type fakeTerraform struct {
-	workspace  string
-	initErr    error
-	planErr    error
-	applyErr   error
-	destroyErr error
-	calls      [][]string
+	workspace    string
+	initErr      error
+	planErr      error
+	applyErr     error
+	destroyErr   error
+	calls        [][]string
+	environments [][]string
 }
 
-func (f *fakeTerraform) Run(_ context.Context, _ []string, _ io.Writer, _ io.Writer, _ string, args ...string) error {
+func (f *fakeTerraform) Run(_ context.Context, environment []string, _ io.Writer, _ io.Writer, _ string, args ...string) error {
 	f.calls = append(f.calls, append([]string(nil), args...))
+	f.environments = append(f.environments, append([]string(nil), environment...))
 	switch args[1] {
 	case "init":
 		return f.initErr
@@ -84,6 +87,98 @@ func newRunner(workspace string, fake *fakeTerraform) Runner {
 	return Runner{Workspace: workspace, Terraform: fake, Terminal: func() bool { return false }}
 }
 
+func TestRecoveryContextJSONRetainsOnlyConfiguredEndpoints(t *testing.T) {
+	endpoints := config.Endpoints{
+		IAM:                "https://iam.test.example.invalid/identity",
+		ContainerService:   "https://containers.example.invalid/global",
+		GlobalTagging:      "https://tagging.example.invalid",
+		ResourceManagement: "https://management.example.invalid",
+		ResourceController: "https://controller.example.invalid",
+		VPC:                "https://vpc.us-south.example.invalid/v1",
+	}
+	recovery, err := newRecoveryContext(config.ResolvedTarget{Name: "test", Target: config.Target{Endpoints: endpoints}}, Values{AuthPolicy: &AuthPolicy{SecretsManagerRegion: "us-south"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serialized struct {
+		Endpoints map[string]string `json:"endpoints"`
+		Values    Values            `json:"values"`
+	}
+	if err := json.Unmarshal(data, &serialized); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"IAM": "https://iam.test.example.invalid/identity", "ContainerService": "https://containers.example.invalid/global", "GlobalTagging": "https://tagging.example.invalid", "ResourceManagement": "https://management.example.invalid", "ResourceController": "https://controller.example.invalid", "VPC": "https://vpc.us-south.example.invalid/v1",
+	}
+	if !reflect.DeepEqual(serialized.Endpoints, want) {
+		t.Fatalf("serialized endpoints = %#v, want %#v", serialized.Endpoints, want)
+	}
+	if serialized.Values.AuthPolicy == nil || serialized.Values.AuthPolicy.SecretsManagerRegion != "us-south" {
+		t.Fatalf("serialized auth policy = %#v", serialized.Values.AuthPolicy)
+	}
+}
+
+func TestAuthPolicyRejectsUnsafeSecretsManagerEndpointComponents(t *testing.T) {
+	policy := AuthPolicy{VPNServerID: "vpn", SecretsManagerID: "instance.invalid/path", SecretsManagerRegion: "us-south", SecretGroupID: "group", CertificateTemplate: "template", Issuer: "issuer", TTL: "2h"}
+	if err := validateAuthPolicy(policy); err == nil {
+		t.Fatal("accepted unsafe Secrets Manager instance component")
+	}
+	policy.SecretsManagerID = "instance"
+	policy.SecretsManagerRegion = "us-south.invalid"
+	if err := validateAuthPolicy(policy); err == nil {
+		t.Fatal("accepted unsafe Secrets Manager region component")
+	}
+}
+
+func TestPrivateOnlyVPCPlanFreezesTerraformAndRecoveryValues(t *testing.T) {
+	inputs := configuredInputs(t)
+	inputs.PrivateOnly = true
+	inputs.AuthPolicy = AuthPolicy{VPNServerID: "vpn", SecretsManagerID: "secrets", SecretsManagerRegion: "us-south", SecretGroupID: "group", CertificateTemplate: "template", Issuer: "issuer", TTL: "2h"}
+	workspace := filepath.Join(t.TempDir(), "plan")
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	fake := &fakeTerraform{}
+	if err := newRunner(workspace, fake).Plan(context.Background(), "allocation-123", inputs, backendConfig(), resultPath); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ReadPlanResult(resultPath)
+	if err != nil || !result.Values.PrivateOnly || !result.Recovery.Values.PrivateOnly {
+		t.Fatalf("private-only plan result = %#v, %v", result, err)
+	}
+	policy, err := json.Marshal(result.Recovery.Values.AuthPolicy)
+	if err != nil || strings.Contains(string(policy), "attempt") {
+		t.Fatalf("frozen private policy retained an attempt: %s, %v", policy, err)
+	}
+	tfvars, err := os.ReadFile(filepath.Join(workspace, ictterraform.TFVarsName))
+	if err != nil || !strings.Contains(string(tfvars), `"private_only":true`) {
+		t.Fatalf("private-only Terraform inputs = %q, %v", tfvars, err)
+	}
+}
+
+func TestResolveRejectsPrivateOnlyOutsideVPC(t *testing.T) {
+	inputs := configuredInputs(t)
+	if err := os.WriteFile(inputs.ConfigPath, []byte(strings.Replace(testConfig, "providers: [vpc-gen2]", "providers: [vpc-gen2, classic]", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputs.Provider = "classic"
+	inputs.PrivateOnly = true
+	inputs.Datacenter = "dal10"
+	inputs.MachineType = "bx2.2x8"
+	inputs.PublicVLANID = "123"
+	inputs.PrivateVLANID = "456"
+	cfg, _, err := config.LoadDiscovered(inputs.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = Runner{Terminal: func() bool { return false }}.resolve(context.Background(), cfg, inputs)
+	if err == nil || !strings.Contains(err.Error(), "private-only requires VPC Gen 2") {
+		t.Fatalf("classic private-only error = %v", err)
+	}
+}
+
 func TestResolveNamePrefixingAndLimits(t *testing.T) {
 	now := time.Date(2026, 9, 7, 11, 29, 13, 0, time.UTC)
 	runner := Runner{Environ: []string{"USER=Fallback Owner"}, Now: func() time.Time { return now }, Suffix: func() string { return "ab12cd34" }}
@@ -116,12 +211,14 @@ func TestPlanReviewApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T)
 	contextPath := filepath.Join(t.TempDir(), "context.json")
 	planFake := &fakeTerraform{}
 	planRunner := newRunner(planWorkspace, planFake)
+	planRunner.Environ = []string{"HOME=/tekton/home", "PATH=/usr/local/bin:/usr/bin"}
 	if err := planRunner.Plan(context.Background(), "allocation-123", configuredInputs(t), backend, contextPath); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := actionNames(planFake.calls), []string{"init", "plan"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan actions = %#v, want %#v", got, want)
 	}
+	assertNoAuthTmpfsEnvironment(t, planFake.environments)
 	handoff, err := ReadPlanResult(contextPath)
 	if err != nil {
 		t.Fatal(err)
@@ -155,10 +252,12 @@ func TestPlanReviewApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T)
 	applyResult := filepath.Join(t.TempDir(), "apply-result.json")
 	applyFake := &fakeTerraform{}
 	applyRunner := newRunner(applyWorkspace, applyFake)
+	applyRunner.Environ = []string{"HOME=/tekton/home", "PATH=/usr/local/bin:/usr/bin"}
 	if err := applyRunner.Apply(context.Background(), "allocation-123", contextPath, backend, applyResult, AuthExport{}); err != nil {
 		t.Fatal(err)
 	}
 	assertOperationCalls(t, applyFake.calls, applyWorkspace, "apply", backend)
+	assertNoAuthTmpfsEnvironment(t, applyFake.environments)
 	assertOperationResult(t, applyResult, "apply", applyWorkspace)
 	if _, err := os.Stat(filepath.Join(applyWorkspace, "terraform.tfstate")); !os.IsNotExist(err) {
 		t.Fatalf("apply depended on local state: %v", err)
@@ -274,6 +373,17 @@ func actionNames(calls [][]string) []string {
 		result = append(result, call[1])
 	}
 	return result
+}
+
+func assertNoAuthTmpfsEnvironment(t *testing.T, environments [][]string) {
+	t.Helper()
+	for _, environment := range environments {
+		for _, value := range environment {
+			if strings.Contains(value, "/auth-tmpfs") {
+				t.Fatalf("infrastructure Terraform inherited auth tmpfs environment: %#v", environment)
+			}
+		}
+	}
 }
 
 func assertOperationCalls(t *testing.T, calls [][]string, workspace, operation string, backend ictterraform.BackendConfig) {

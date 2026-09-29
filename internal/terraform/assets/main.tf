@@ -33,6 +33,20 @@ data "ibm_is_public_gateways" "cluster" {
   count = var.cluster_mode == "vpc" && length(coalesce(var.public_gateway_ids, [])) == 1 ? 1 : 0
 }
 
+data "ibm_is_vpn_server" "private_api" {
+  count = local.private_vpn_ingress_needed ? 1 : 0
+
+  identifier = var.auth_vpn_server_id
+}
+
+data "ibm_is_security_group" "private_api" {
+  count = local.private_vpn_ingress_needed ? 1 : 0
+
+  name       = "kube-vpegw-${ibm_container_vpc_cluster.cluster[0].id}"
+  vpc        = local.effective_vpc_id
+  depends_on = [ibm_container_vpc_cluster.cluster]
+}
+
 data "ibm_is_vpc" "satellite" {
   count = local.satellite_managed_infrastructure_needed && var.vpc_id != null ? 1 : 0
 
@@ -99,6 +113,10 @@ locals {
     local.existing_subnet_public_gateway != "" ? local.existing_subnet_public_gateway :
     ibm_is_public_gateway.cluster[0].id
   ) : null
+  private_vpn_ingress_needed = var.cluster_mode == "vpc" && var.private_only && trimspace(var.auth_vpn_server_id) != ""
+  private_api_endpoint_parts = try(regex("^https://([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::([0-9]{1,5}))?/?$", try(ibm_container_vpc_cluster.cluster[0].vpe_service_endpoint_url, "")), [])
+  private_api_port           = try(tonumber(coalesce(local.private_api_endpoint_parts[1], "")), 443)
+  private_api_endpoint_valid = length(local.private_api_endpoint_parts) == 2 && local.private_api_port >= 1 && local.private_api_port <= 65535
 
   supplied_satellite_subnets_by_zone = var.cluster_mode == "satellite" ? {
     for zone in var.satellite_zones : zone => try(one([
@@ -183,14 +201,15 @@ resource "ibm_container_vpc_cluster" "cluster" {
 
   depends_on = [ibm_is_subnet_public_gateway_attachment.cluster]
 
-  name              = var.cluster_name
-  offering          = var.platform
-  kube_version      = var.kube_version
-  flavor            = var.flavor
-  worker_count      = var.worker_count
-  vpc_id            = local.effective_vpc_id
-  resource_group_id = data.ibm_resource_group.selected.id
-  wait_till         = "OneWorkerNodeReady"
+  name                            = var.cluster_name
+  offering                        = var.platform
+  kube_version                    = var.kube_version
+  flavor                          = var.flavor
+  worker_count                    = var.worker_count
+  vpc_id                          = local.effective_vpc_id
+  resource_group_id               = data.ibm_resource_group.selected.id
+  disable_public_service_endpoint = var.private_only
+  wait_till                       = "OneWorkerNodeReady"
 
   timeouts {
     create = "90m"
@@ -240,6 +259,33 @@ resource "ibm_container_vpc_cluster" "cluster" {
     precondition {
       condition     = length(coalesce(var.subnet_ids, [])) == 0 || local.existing_subnet_public_gateway == "" || local.existing_subnet_public_gateway == local.effective_public_gateway_id
       error_message = "The supplied subnet already has a different public gateway attachment."
+    }
+
+    precondition {
+      condition     = !var.private_only || trimspace(var.auth_vpn_server_id) != ""
+      error_message = "Private-only VPC clusters require a frozen VPN server ID."
+    }
+  }
+}
+
+resource "ibm_is_security_group_rule" "private_api_vpn_ingress" {
+  count = local.private_vpn_ingress_needed ? 1 : 0
+
+  # This explicit edge also reverses on destroy: remove the ingress rule before
+  # Terraform asks IBM to delete the cluster and its generated VPE security group.
+  depends_on = [ibm_container_vpc_cluster.cluster]
+
+  group     = data.ibm_is_security_group.private_api[0].id
+  direction = "inbound"
+  protocol  = "tcp"
+  port_min  = local.private_api_port
+  port_max  = local.private_api_port
+  remote    = data.ibm_is_vpn_server.private_api[0].client_ip_pool
+
+  lifecycle {
+    precondition {
+      condition     = local.private_api_endpoint_valid
+      error_message = "The cluster VPE service endpoint must be an HTTPS URL with a valid TCP port."
     }
   }
 }

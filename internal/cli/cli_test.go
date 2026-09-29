@@ -47,10 +47,26 @@ func TestSplitLifecycleGrammarRejectsCreate(t *testing.T) {
 	if parsed.Command() != "destroy <state-id>" || command.Destroy.StateID != "fixture" {
 		t.Fatalf("destroy = %#v", command.Destroy)
 	}
+	parsed, command, err = Parse([]string{"auth", "fixture", "--context-file", contextPath, "--result-file", resultPath, "--auth-manifest-file", manifestPath, "--auth-output-dir", outputDir, "--auth-tmpfs-dir", t.TempDir(), "--auth-allocation-uid", "allocation-123", "--auth-attempt-id", "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Command() != "auth <state-id>" || command.Auth.StateID != "fixture" || command.Auth.AuthTmpfsDir == "" {
+		t.Fatalf("auth = %#v", command.Auth)
+	}
+	parsed, command, err = Parse([]string{"auth-cleanup", "fixture", "--context-file", contextPath, "--result-file", resultPath, "--certificate-id", "certificate-123", "--certificate-allocation-uid", "allocation-123", "--certificate-attempt-id", "attempt-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Command() != "auth-cleanup <state-id>" || len(command.AuthCleanup.CertificateIDs) != 1 || command.AuthCleanup.CertificateIDs[0] != "certificate-123" || command.AuthCleanup.CertificateAllocationUID != "allocation-123" || command.AuthCleanup.CertificateAttemptID != "attempt-123" {
+		t.Fatalf("auth cleanup = %#v", command.AuthCleanup)
+	}
 	for _, args := range [][]string{
 		{"create", "fixture"},
 		{"plan"},
 		{"plan", "fixture", "--backend-config", backendPath},
+		{"plan", "fixture", "--auth-attempt-id", "attempt-123"},
+		{"plan", "fixture", "--auth-allocation-uid", "allocation-123"},
 		{"review", "fixture", "--context-file", contextPath, "--backend-config", backendPath},
 		{"apply", "fixture", "--context-file", contextPath, "--backend-config", backendPath, "--result-file", resultPath, "--name", "replacement"},
 		{"destroy", "fixture", "--context-file", contextPath, "--backend-config", backendPath},
@@ -91,7 +107,7 @@ func (f *cleanupTerraform) Output(context.Context, []string, string, ...string) 
 	return nil, errors.New("unexpected auth acquisition")
 }
 
-func TestCLIDestroyReportsSanitizedCompanionCleanupFailure(t *testing.T) {
+func TestCLIDestroyDoesNotInferAuthCleanupOwnership(t *testing.T) {
 	backendPath := filepath.Join(t.TempDir(), "backend.json")
 	if err := os.WriteFile(backendPath, []byte(`{"version":1,"bucket":"ict-state-bucket","key":"allocations/cluster-123.tfstate","region":"us-south","endpoint":"https://s3.us-south.cloud-object-storage.appdomain.cloud","skip_credentials_validation":true,"skip_metadata_api_check":true,"skip_region_validation":true,"skip_requesting_account_id":true,"force_path_style":true}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -103,7 +119,7 @@ func TestCLIDestroyReportsSanitizedCompanionCleanupFailure(t *testing.T) {
 	}
 	contextPath, resultPath := filepath.Join(t.TempDir(), "context.json"), filepath.Join(t.TempDir(), "destroy.json")
 	fixture := &cleanupTerraform{cleanup: errors.New("provider stale secret 404 synthetic detail")}
-	planArgs := []string{"plan", "allocation-123", "--config", configPath, "--target", "example", "--provider", "vpc-gen2", "--platform", "kubernetes", "--version", "1.31.9", "--resource-group", "fixture-group", "--zone", "us-south-1", "--vpc-region", "us-south", "--account-id", "account-1", "--flavor", "bx2.2x8", "--name", "fixture-cluster", "--backend-config", backendPath, "--result-file", contextPath, "--auth-allocation-uid", "allocation-123", "--auth-vpn-server-id", "vpn-1", "--auth-secrets-manager-id", "sm-1", "--auth-secrets-manager-region", "eu-gb", "--auth-secret-group-id", "group-1", "--auth-certificate-template", "client-template", "--auth-issuer", "issuer-1", "--auth-ttl", "168h"}
+	planArgs := []string{"plan", "allocation-123", "--config", configPath, "--target", "example", "--provider", "vpc-gen2", "--platform", "kubernetes", "--version", "1.31.9", "--resource-group", "fixture-group", "--zone", "us-south-1", "--vpc-region", "us-south", "--account-id", "account-1", "--flavor", "bx2.2x8", "--name", "fixture-cluster", "--backend-config", backendPath, "--result-file", contextPath, "--auth-vpn-server-id", "vpn-1", "--auth-secrets-manager-id", "sm-1", "--auth-secrets-manager-region", "eu-gb", "--auth-secret-group-id", "group-1", "--auth-certificate-template", "client-template", "--auth-issuer", "issuer-1", "--auth-ttl", "168h"}
 	parsed, command, err := Parse(planArgs)
 	if err != nil {
 		t.Fatal(err)
@@ -127,11 +143,11 @@ func TestCLIDestroyReportsSanitizedCompanionCleanupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result workflow.OperationResult
-	if err := json.Unmarshal(mustReadCLI(t, resultPath), &result); err != nil || result.Operation != "destroy" || result.AuthCleanup != "failed" {
+	if err := json.Unmarshal(mustReadCLI(t, resultPath), &result); err != nil || result.Operation != "destroy" || result.AuthCleanup != "" || result.Reason != "" || result.Certificate != nil {
 		t.Fatalf("destroy result = %#v, %v", result, err)
 	}
-	if stderr.String() != "ict: auth cleanup unavailable\n" || strings.Contains(stderr.String(), "404") || len(fixture.calls) != 6 || len(fixture.tfvars) != 3 || strings.Contains(string(fixture.tfvars[2]), "cluster_name") || !strings.Contains(string(fixture.tfvars[2]), `"auth_secrets_manager_id":"sm-1"`) {
-		t.Fatalf("CLI destroy did not use bounded frozen cleanup: stderr=%q calls=%#v tfvars=%q", stderr.String(), fixture.calls, fixture.tfvars)
+	if stderr.Len() != 0 || len(fixture.calls) != 4 || len(fixture.tfvars) != 2 {
+		t.Fatalf("CLI destroy unexpectedly used companion auth state: stderr=%q calls=%#v tfvars=%q", stderr.String(), fixture.calls, fixture.tfvars)
 	}
 }
 
