@@ -30,7 +30,7 @@ func TestMaterializeOmitsRepositoryTestFiles(t *testing.T) {
 			t.Fatalf("missing production file %s: %v", name, err)
 		}
 	}
-	for _, name := range []string{"cluster-name.tftest.hcl", "satellite-topology.tftest.hcl", "vpc-reuse.tftest.hcl", "private-vpe-ingress.tftest.hcl"} {
+	for _, name := range []string{"cluster-name.tftest.hcl", "headlamp.tftest.hcl", "satellite-topology.tftest.hcl", "vpc-reuse.tftest.hcl", "private-vpe-ingress.tftest.hcl"} {
 		if _, err := os.Stat(filepath.Join(workspace, name)); !os.IsNotExist(err) {
 			t.Fatalf("materialized test file %s: %v", name, err)
 		}
@@ -64,6 +64,39 @@ func TestMaterializePrivateVPNIngressOwnsOnlyTheRule(t *testing.T) {
 	}
 	if strings.Contains(main, `output "`) {
 		t.Fatalf("infrastructure root must not expose private VPN ingress values: %s", main)
+	}
+}
+
+func TestMaterializeHeadlampUsesOnlySelectedClusterAndResourceGroup(t *testing.T) {
+	workspace := t.TempDir()
+	if err := Materialize(workspace); err != nil {
+		t.Fatal(err)
+	}
+	variables := string(mustReadAuth(t, filepath.Join(workspace, "variables.tf")))
+	main := string(mustReadAuth(t, filepath.Join(workspace, "main.tf")))
+	for _, required := range []string{
+		`variable "headlamp"`,
+		`default     = false`,
+	} {
+		if !strings.Contains(variables, required) {
+			t.Fatalf("Headlamp variable is missing %q", required)
+		}
+	}
+	if count := strings.Count(main, `resource "ibm_container_addons" "headlamp"`); count != 1 {
+		t.Fatalf("Headlamp resources = %d, want 1", count)
+	}
+	for _, required := range []string{
+		`count = var.headlamp && var.platform == "kubernetes" && contains(["vpc", "classic"], var.cluster_mode) ? 1 : 0`,
+		`condition     = !var.headlamp || var.platform == "kubernetes"`,
+		`ibm_container_vpc_cluster.cluster[0].id`,
+		`ibm_container_cluster.cluster[0].id`,
+		`resource_group_id = data.ibm_resource_group.selected.id`,
+		`manage_all_addons = false`,
+		`name = "headlamp"`,
+	} {
+		if !strings.Contains(main, required) {
+			t.Fatalf("Headlamp resource is missing %q", required)
+		}
 	}
 }
 

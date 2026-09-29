@@ -265,6 +265,11 @@ resource "ibm_container_vpc_cluster" "cluster" {
       condition     = !var.private_only || trimspace(var.auth_vpn_server_id) != ""
       error_message = "Private-only VPC clusters require a frozen VPN server ID."
     }
+
+    precondition {
+      condition     = !var.headlamp || var.platform == "kubernetes"
+      error_message = "Headlamp requires the Kubernetes platform."
+    }
   }
 }
 
@@ -304,6 +309,25 @@ resource "ibm_container_cluster" "cluster" {
   no_subnet         = true
   resource_group_id = data.ibm_resource_group.selected.id
   wait_till         = "OneWorkerNodeReady"
+
+  lifecycle {
+    precondition {
+      condition     = !var.headlamp || var.platform == "kubernetes"
+      error_message = "Headlamp requires the Kubernetes platform."
+    }
+  }
+}
+
+resource "ibm_container_addons" "headlamp" {
+  count = var.headlamp && var.platform == "kubernetes" && contains(["vpc", "classic"], var.cluster_mode) ? 1 : 0
+
+  cluster           = var.cluster_mode == "vpc" ? ibm_container_vpc_cluster.cluster[0].id : ibm_container_cluster.cluster[0].id
+  resource_group_id = data.ibm_resource_group.selected.id
+  manage_all_addons = false
+
+  addons {
+    name = "headlamp"
+  }
 }
 
 resource "ibm_is_vpc" "satellite" {
@@ -516,6 +540,11 @@ resource "ibm_satellite_cluster" "satellite" {
     precondition {
       condition     = !local.satellite_workers_reused || alltrue([for id in local.supplied_satellite_worker_instance_ids : try(local.supplied_satellite_worker_hosts_by_id[id].host_id, "") != "" && lower(try(local.supplied_satellite_worker_hosts_by_id[id].status, "")) == "ready" && trimspace(try(local.supplied_satellite_worker_hosts_by_id[id].cluster_name, "")) == ""])
       error_message = "Each supplied Satellite worker VSI must be registered in the location, unassigned, and ready."
+    }
+
+    precondition {
+      condition     = !var.headlamp
+      error_message = "Headlamp requires a Kubernetes VPC Gen 2 or Classic cluster."
     }
   }
 }

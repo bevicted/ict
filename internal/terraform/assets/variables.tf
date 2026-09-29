@@ -54,6 +54,12 @@ variable "private_only" {
   default     = false
 }
 
+variable "headlamp" {
+  description = "Install the managed Headlamp add-on on a Kubernetes VPC Gen 2 or Classic cluster."
+  type        = bool
+  default     = false
+}
+
 variable "auth_vpn_server_id" {
   description = "Frozen existing VPN server ID used only for private VPC API ingress."
   type        = string

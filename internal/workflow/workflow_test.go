@@ -179,6 +179,96 @@ func TestResolveRejectsPrivateOnlyOutsideVPC(t *testing.T) {
 	}
 }
 
+func TestResolveHeadlampSupportsKubernetesVPCAndClassicOnly(t *testing.T) {
+	inputs := configuredInputs(t)
+	inputs.Headlamp = true
+	cfg, _, err := config.LoadDiscovered(inputs.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, _, err := (Runner{Terminal: func() bool { return false }}).resolve(context.Background(), cfg, inputs)
+	if err != nil || !values.Headlamp || values.ClusterMode != "vpc" {
+		t.Fatalf("VPC Headlamp resolution = %#v, %v", values, err)
+	}
+
+	inputs.Platform = "openshift"
+	inputs.WorkerCount = 2
+	if _, _, err := (Runner{Terminal: func() bool { return false }}).resolve(context.Background(), cfg, inputs); err == nil || !strings.Contains(err.Error(), "headlamp requires Kubernetes") {
+		t.Fatalf("OpenShift Headlamp error = %v", err)
+	}
+
+	inputs = configuredInputs(t)
+	if err := os.WriteFile(inputs.ConfigPath, []byte(strings.Replace(testConfig, "providers: [vpc-gen2]", "providers: [vpc-gen2, classic]", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputs.Provider = "classic"
+	inputs.Headlamp = true
+	inputs.Datacenter = "dal10"
+	inputs.MachineType = "bx2.2x8"
+	inputs.PublicVLANID = "123"
+	inputs.PrivateVLANID = "456"
+	cfg, _, err = config.LoadDiscovered(inputs.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, _, err = (Runner{Terminal: func() bool { return false }}).resolve(context.Background(), cfg, inputs)
+	if err != nil || !values.Headlamp || values.ClusterMode != "classic" {
+		t.Fatalf("Classic Headlamp resolution = %#v, %v", values, err)
+	}
+
+	if _, err := validateRecoveryValues(Values{ClusterMode: "vpc", Platform: "openshift", Headlamp: true}, ""); err == nil {
+		t.Fatal("accepted an OpenShift Headlamp recovery context")
+	}
+
+	satellite := Values{
+		ClusterName:                    "fixture-satellite",
+		ResourceGroupName:              "fixture-group",
+		Region:                         "us-south",
+		ClusterMode:                    "satellite",
+		Platform:                       "openshift",
+		KubeVersion:                    "4.18_openshift",
+		WorkerCount:                    3,
+		SatelliteZones:                 []string{"us-south-1", "us-south-2", "us-south-3"},
+		SatelliteManagedFrom:           "synthetic-location",
+		SatelliteHostImage:             "synthetic-image",
+		SatelliteHostProfile:           "bx2-4x16",
+		SatelliteSSHKeyID:              "synthetic-key",
+		SatelliteWorkerOperatingSystem: "RHCOS",
+	}
+	if provider, err := validateRecoveryValues(satellite, ""); err != nil || provider != config.ProviderSatellite {
+		t.Fatalf("valid Satellite recovery context = %q, %v", provider, err)
+	}
+	satellite.Headlamp = true
+	if _, err := validateRecoveryValues(satellite, ""); err == nil {
+		t.Fatal("accepted a Satellite Headlamp recovery context")
+	}
+}
+
+func TestHeadlampTFVarsAndRecoveryRoundTrip(t *testing.T) {
+	values := Values{ClusterName: "fixture-cluster", ResourceGroupName: "fixture-group", Region: "us-south", ClusterMode: "vpc", Platform: "kubernetes", KubeVersion: "1.31", WorkerCount: 1, Zone: "us-south-1", Flavor: "bx2.2x8"}
+	omitted, err := infrastructureTFVars(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values.Headlamp = false
+	falseTFVars, err := infrastructureTFVars(values)
+	if err != nil || !reflect.DeepEqual(omitted, falseTFVars) || strings.Contains(string(falseTFVars), "headlamp") {
+		t.Fatalf("false Headlamp tfvars = %s, %v", falseTFVars, err)
+	}
+	values.Headlamp = true
+	trueTFVars, err := infrastructureTFVars(values)
+	if err != nil || !strings.Contains(string(trueTFVars), `"headlamp":true`) {
+		t.Fatalf("true Headlamp tfvars = %s, %v", trueTFVars, err)
+	}
+	recovery, err := newRecoveryContext(config.ResolvedTarget{Name: "example"}, values)
+	if err != nil || !recovery.Values.Headlamp {
+		t.Fatalf("Headlamp recovery = %#v, %v", recovery, err)
+	}
+	if _, err := recoveryValuesFromTFVars(values, recovery.SatelliteSSHPublicKeyFingerprint); err != nil {
+		t.Fatalf("Headlamp recovery validation = %v", err)
+	}
+}
+
 func TestResolveNamePrefixingAndLimits(t *testing.T) {
 	now := time.Date(2026, 9, 7, 11, 29, 13, 0, time.UTC)
 	runner := Runner{Environ: []string{"USER=Fallback Owner"}, Now: func() time.Time { return now }, Suffix: func() string { return "ab12cd34" }}
@@ -212,8 +302,13 @@ func TestPlanReviewApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T)
 	planFake := &fakeTerraform{}
 	planRunner := newRunner(planWorkspace, planFake)
 	planRunner.Environ = []string{"HOME=/tekton/home", "PATH=/usr/local/bin:/usr/bin"}
-	if err := planRunner.Plan(context.Background(), "allocation-123", configuredInputs(t), backend, contextPath); err != nil {
+	inputs := configuredInputs(t)
+	inputs.Headlamp = true
+	if err := planRunner.Plan(context.Background(), "allocation-123", inputs, backend, contextPath); err != nil {
 		t.Fatal(err)
+	}
+	if tfvars := string(mustRead(t, filepath.Join(planWorkspace, ictterraform.TFVarsName))); !strings.Contains(tfvars, `"headlamp":true`) {
+		t.Fatalf("plan tfvars = %s", tfvars)
 	}
 	if got, want := actionNames(planFake.calls), []string{"init", "plan"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan actions = %#v, want %#v", got, want)
@@ -223,7 +318,7 @@ func TestPlanReviewApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if handoff.StateID != "allocation-123" || handoff.Values.ClusterName != "fixture-cluster" || !reflect.DeepEqual(handoff.Backend, backend) {
+	if handoff.StateID != "allocation-123" || handoff.Values.ClusterName != "fixture-cluster" || !handoff.Values.Headlamp || !handoff.Recovery.Values.Headlamp || !reflect.DeepEqual(handoff.Backend, backend) {
 		t.Fatalf("context = %#v", handoff)
 	}
 	if strings.Contains(string(mustRead(t, contextPath)), "AWS_SECRET_ACCESS_KEY") {
@@ -257,6 +352,9 @@ func TestPlanReviewApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T)
 		t.Fatal(err)
 	}
 	assertOperationCalls(t, applyFake.calls, applyWorkspace, "apply", backend)
+	if tfvars := string(mustRead(t, filepath.Join(applyWorkspace, ictterraform.TFVarsName))); !strings.Contains(tfvars, `"headlamp":true`) {
+		t.Fatalf("apply tfvars = %s", tfvars)
+	}
 	assertNoAuthTmpfsEnvironment(t, applyFake.environments)
 	assertOperationResult(t, applyResult, "apply", applyWorkspace)
 	if _, err := os.Stat(filepath.Join(applyWorkspace, "terraform.tfstate")); !os.IsNotExist(err) {
@@ -271,6 +369,9 @@ func TestPlanReviewApplyDestroyUseFrozenMetadataAndFreshWorkspaces(t *testing.T)
 		t.Fatal(err)
 	}
 	assertOperationCalls(t, destroyFake.calls, destroyWorkspace, "destroy", backend)
+	if tfvars := string(mustRead(t, filepath.Join(destroyWorkspace, ictterraform.TFVarsName))); !strings.Contains(tfvars, `"headlamp":true`) {
+		t.Fatalf("destroy tfvars = %s", tfvars)
+	}
 	assertOperationResult(t, destroyResult, "destroy", destroyWorkspace)
 }
 
@@ -312,6 +413,25 @@ func TestApplyDestroyRejectTamperingBeforeTerraform(t *testing.T) {
 	}
 }
 
+func TestPlanResultRejectsHeadlampRecoveryMismatch(t *testing.T) {
+	backend := backendConfig()
+	workspace := filepath.Join(t.TempDir(), "plan")
+	contextPath := filepath.Join(t.TempDir(), "context.json")
+	inputs := configuredInputs(t)
+	inputs.Headlamp = true
+	if err := newRunner(workspace, &fakeTerraform{}).Plan(context.Background(), "allocation-123", inputs, backend, contextPath); err != nil {
+		t.Fatal(err)
+	}
+	data := mustRead(t, contextPath)
+	tampered := []byte(strings.ReplaceAll(string(data), `"headlamp":true`, `"headlamp":false`))
+	if err := os.WriteFile(contextPath, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPlanResult(contextPath); err == nil {
+		t.Fatal("accepted a mismatched Headlamp recovery context")
+	}
+}
+
 func TestDestroyNeverTreatsMissingLocalStateOrBackendFailureAsSuccess(t *testing.T) {
 	backend := backendConfig()
 	contextPath := writePlanContext(t, backend)
@@ -339,10 +459,24 @@ func TestDestroyNeverTreatsMissingLocalStateOrBackendFailureAsSuccess(t *testing
 
 func TestFailedApplyCanBeFollowedByDestroy(t *testing.T) {
 	backend := backendConfig()
-	contextPath := writePlanContext(t, backend)
+	planWorkspace := filepath.Join(t.TempDir(), "plan")
+	contextPath := filepath.Join(t.TempDir(), "context.json")
+	inputs := configuredInputs(t)
+	inputs.Headlamp = true
+	if err := newRunner(planWorkspace, &fakeTerraform{}).Plan(context.Background(), "allocation-123", inputs, backend, contextPath); err != nil {
+		t.Fatal(err)
+	}
 	applyFake := &fakeTerraform{applyErr: errors.New("apply failed")}
-	if err := newRunner(filepath.Join(t.TempDir(), "apply"), applyFake).Apply(context.Background(), "allocation-123", contextPath, backend, filepath.Join(t.TempDir(), "apply-result.json"), AuthExport{}); err == nil {
-		t.Fatal("apply unexpectedly succeeded")
+	applyWorkspace := filepath.Join(t.TempDir(), "apply")
+	applyResult := filepath.Join(t.TempDir(), "apply-result.json")
+	if err := newRunner(applyWorkspace, applyFake).Apply(context.Background(), "allocation-123", contextPath, backend, applyResult, AuthExport{}); err == nil || !strings.Contains(err.Error(), "apply failed") {
+		t.Fatalf("apply error = %v", err)
+	}
+	if tfvars := string(mustRead(t, filepath.Join(applyWorkspace, ictterraform.TFVarsName))); !strings.Contains(tfvars, `"headlamp":true`) {
+		t.Fatalf("failed apply tfvars = %s", tfvars)
+	}
+	if _, err := os.Stat(applyResult); !os.IsNotExist(err) {
+		t.Fatalf("failed apply wrote success result: %v", err)
 	}
 	destroyFake := &fakeTerraform{}
 	if err := newRunner(filepath.Join(t.TempDir(), "destroy"), destroyFake).Destroy(context.Background(), "allocation-123", contextPath, backend, filepath.Join(t.TempDir(), "destroy-result.json")); err != nil {

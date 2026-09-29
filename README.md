@@ -83,6 +83,8 @@ ict plan allocation-123 \
 
 It initializes the S3 backend and produces a disposable Terraform plan without applying or prompting. The result is strict versioned frozen metadata containing canonical values, recovery context, backend identity, lifecycle ID, and a task-local binary-plan path for private review tooling. The binary plan itself is never serialized in the result and is not an apply input.
 
+Pass `--headlamp=true` to install IBM Cloud's managed Headlamp add-on through the same Terraform plan, apply, and destroy lifecycle. It is optional and defaults to false. Headlamp is supported only for Kubernetes VPC Gen 2 and Classic clusters; provider configure and wait failures are ordinary Terraform errors.
+
 Generated names, defaults, endpoint selection, provider ownership choices, and the canonical tfvars digest are resolved only by `plan`. VPC Gen 2, Classic, and Satellite recovery safeguards remain encoded in those frozen values. Existing VPC networking, Satellite infrastructure, and externally owned resources continue to be represented as Terraform data sources and are not deleted by destroy. For a private-only VPC cluster, Terraform reads IBM's generated API VPE security group in the cluster VPC and its VPN client pool, and owns only the one TCP ingress rule for that exact pool and endpoint port; it never discovers or manages the VPE, its security group, or IBM baseline rules.
 
 When ICT is used by Servitor, Slack approval authorizes this frozen configuration, not an immutable Terraform action list. `apply` deliberately makes a fresh plan, so cloud or provider drift between review and apply can change the resulting actions. The review plan is ephemeral and is neither saved for approval nor accepted as an apply input.

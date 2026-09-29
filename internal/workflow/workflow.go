@@ -54,6 +54,7 @@ type Inputs struct {
 	Version                        string
 	ResourceGroup                  string
 	PrivateOnly                    bool
+	Headlamp                       bool
 	Zone                           string
 	Flavor                         string
 	AccountID                      string
@@ -114,6 +115,7 @@ type Values struct {
 	KubeVersion                    string      `json:"kube_version"`
 	WorkerCount                    int         `json:"worker_count"`
 	PrivateOnly                    bool        `json:"private_only,omitempty"`
+	Headlamp                       bool        `json:"headlamp,omitempty"`
 	Zone                           string      `json:"zone,omitempty"`
 	Flavor                         string      `json:"flavor,omitempty"`
 	AccountID                      string      `json:"account_id,omitempty"`
@@ -701,6 +703,9 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 	if supplied.Platform != "kubernetes" && supplied.Platform != "openshift" {
 		return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid platform %q", supplied.Platform)
 	}
+	if supplied.Headlamp && (supplied.Platform != "kubernetes" || provider == config.ProviderSatellite) {
+		return Values{}, config.ResolvedTarget{}, errors.New("headlamp requires Kubernetes on VPC Gen 2 or Classic")
+	}
 	version, err := normalizeVersion(supplied.Platform, supplied.Version)
 	if err != nil {
 		return Values{}, config.ResolvedTarget{}, err
@@ -761,7 +766,7 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 			policy := supplied.AuthPolicy
 			authPolicy = &policy
 		}
-		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, PrivateOnly: supplied.PrivateOnly, Zone: supplied.Zone, Flavor: supplied.Flavor, AccountID: supplied.AccountID, VPCRegion: supplied.VPCRegion, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), AuthPolicy: authPolicy}, target, nil
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: region, ClusterMode: "vpc", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, PrivateOnly: supplied.PrivateOnly, Headlamp: supplied.Headlamp, Zone: supplied.Zone, Flavor: supplied.Flavor, AccountID: supplied.AccountID, VPCRegion: supplied.VPCRegion, VPCID: supplied.VPCID, SubnetIDs: slices.Clone(supplied.SubnetIDs), PublicGatewayIDs: slices.Clone(supplied.PublicGatewayIDs), AuthPolicy: authPolicy}, target, nil
 	case config.ProviderClassic:
 		if !datacenterPattern.MatchString(supplied.Datacenter) {
 			return Values{}, config.ResolvedTarget{}, fmt.Errorf("invalid datacenter %q", supplied.Datacenter)
@@ -782,7 +787,7 @@ func (r Runner) resolve(ctx context.Context, cfg *config.Config, supplied Inputs
 		if err != nil {
 			return Values{}, config.ResolvedTarget{}, err
 		}
-		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: target.DefaultRegion, ClusterMode: "classic", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Datacenter: supplied.Datacenter, MachineType: supplied.MachineType, PublicVLANID: supplied.PublicVLANID, PrivateVLANID: supplied.PrivateVLANID}, target, nil
+		return Values{ClusterName: name, ResourceGroupName: supplied.ResourceGroup, Region: target.DefaultRegion, ClusterMode: "classic", Platform: supplied.Platform, KubeVersion: version, WorkerCount: workers, Headlamp: supplied.Headlamp, Datacenter: supplied.Datacenter, MachineType: supplied.MachineType, PublicVLANID: supplied.PublicVLANID, PrivateVLANID: supplied.PrivateVLANID}, target, nil
 	case config.ProviderSatellite:
 		if workers != 1 && workers != 3 {
 			return Values{}, config.ResolvedTarget{}, errors.New("Satellite worker count must be one or three")
@@ -1723,7 +1728,7 @@ func validateRecoveryValues(values Values, fingerprint string) (config.Provider,
 			return "", err
 		}
 	}
-	if strings.TrimSpace(values.ResourceGroupName) == "" || values.WorkerCount < 1 || (values.Platform != "kubernetes" && values.Platform != "openshift") {
+	if strings.TrimSpace(values.ResourceGroupName) == "" || values.WorkerCount < 1 || (values.Platform != "kubernetes" && values.Platform != "openshift") || values.Headlamp && (values.Platform != "kubernetes" || values.ClusterMode == "satellite") {
 		return "", errors.New("invalid recovery values")
 	}
 	version, err := normalizeVersion(values.Platform, values.KubeVersion)

@@ -77,6 +77,31 @@ func TestSplitLifecycleGrammarRejectsCreate(t *testing.T) {
 	}
 }
 
+func TestPlanHeadlampFlagMapsToWorkflowInputs(t *testing.T) {
+	backendPath := filepath.Join(t.TempDir(), "backend.json")
+	resultPath := filepath.Join(t.TempDir(), "context.json")
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "omitted", want: false},
+		{name: "true", args: []string{"--headlamp=true"}, want: true},
+		{name: "false", args: []string{"--headlamp=false"}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"plan", "fixture", "--backend-config", backendPath, "--result-file", resultPath}, test.args...)
+			_, command, err := Parse(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := command.Plan.inputs().Headlamp; got != test.want {
+				t.Fatalf("headlamp = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 type cleanupTerraform struct {
 	calls   [][]string
 	tfvars  [][]byte
